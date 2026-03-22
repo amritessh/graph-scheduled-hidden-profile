@@ -27,10 +27,22 @@ class RunManifest(BaseModel):
     k: int
     model: str | None = None
     seed: int | None = None
+    task_id: str = "hiring_v1"
+    information_condition: str = "hidden_profile"
+    tom_bridge: bool = False
+
+
+class AgentDecision(BaseModel):
+    agent_id: int
+    choice: str | None = Field(
+        default=None, description="X, Y, or Z if parsed; None if parse failed"
+    )
+    justification: str = ""
+    raw_response: str = ""
 
 
 class ExperimentRun(BaseModel):
     manifest: RunManifest
     dyads: list[DyadTranscript] = Field(default_factory=list)
-    # Filled later: per-agent private context keys, final votes, etc.
+    final_decisions: list[AgentDecision] = Field(default_factory=list)
     notes: dict[str, Any] = Field(default_factory=dict)

@@ -52,6 +52,49 @@ def run_dyad_llm(
     system_v: str,
     turns: int = 6,
 ) -> DyadTranscript:
-    """Alternating dyad; each side gets system prompt + shared thread as user/assistant."""
-    # Implement in a follow-up PR once you have prompts + OpenAI client
-    raise NotImplementedError("Wire OpenAI-compatible client + prompts")
+    """
+    Alternating dyad. Each turn the **current speaker**'s system prompt is used; the user
+    message carries the dialogue so far (plain text).
+    """
+    transcript = DyadTranscript(
+        u=min(u, v),
+        v=max(u, v),
+        round_index=round_index,
+        round_label=round_label,
+        messages=[],
+    )
+    lines: list[str] = []
+
+    for t in range(turns):
+        speaker = u if t % 2 == 0 else v
+        system = system_u if speaker == u else system_v
+        so_far = "\n".join(lines) if lines else "(No messages yet — open the discussion.)"
+        user_msg = (
+            f"You are Agent {speaker}. You are speaking privately with one colleague.\n\n"
+            f"Conversation so far:\n{so_far}\n\n"
+            "Speak next. Reply in 1–3 sentences. Do not prefix with your agent number; "
+            "just say what you want to say."
+        )
+        _meta = getattr(client, "set_call_meta", None)
+        if callable(_meta):
+            _meta(
+                kind="dyad",
+                round_index=round_index,
+                round_label=round_label,
+                dyad_u=u,
+                dyad_v=v,
+                turn=t,
+                speaker=speaker,
+            )
+        content = client.complete(system, [{"role": "user", "content": user_msg}])
+        line = f"Agent {speaker}: {content}"
+        lines.append(line)
+        transcript.messages.append(
+            Message(
+                role=f"agent_{speaker}",
+                content=content.strip(),
+                metadata={"turn": t},
+            )
+        )
+
+    return transcript

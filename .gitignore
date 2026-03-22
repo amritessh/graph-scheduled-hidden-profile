@@ -5,3 +5,5 @@ __pycache__/
 .ruff_cache/
 dist/
 *.egg-info/
+_tmp_run.json
+results/

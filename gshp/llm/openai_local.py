@@ -1,15 +1,19 @@
 """
-OpenAI-compatible chat for local vLLM — conventions aligned with ``AI-GBS/llm_run.py``.
+OpenAI-compatible chat: **one model string** picks the backend (like a unified ``chat(model, ...)`` router).
 
-Use the same model strings you use there:
+**Local / self-hosted** (OpenAI-compatible HTTP):
 
 - ``vllm:8000/my-served-model-name`` → ``http://127.0.0.1:8000/v1``
 - ``vllm/my-model`` → ``$VLLM_BASE_URL`` (default ``http://127.0.0.1:8000/v1``) + model id
-- ``localhost:8000/my-model`` → same routing as ``vllm:8000/...`` (chat completions)
+- ``localhost:8000/my-model`` → ``http://127.0.0.1:8000/v1`` + model id
 
-Ollama-style ``localhost:5001`` *without* a ``/model`` path uses a different API
-(``/api/generate``) in AI-GBS; this module only implements **OpenAI-compatible**
-``/v1/chat/completions`` (vLLM, TensorRT-LLM OpenAI server, etc.).
+**Cloud APIs** (via :func:`make_llm_client`):
+
+- ``gpt-4o-mini`` or any bare OpenAI model id → ``https://api.openai.com/v1`` + ``OPENAI_API_KEY``
+- ``openai/gpt-4o-mini`` → same (optional explicit prefix)
+- ``openrouter/organization/model`` → OpenRouter + ``OPENROUTER_API_KEY``
+
+Ollama’s native ``/api/generate`` is a different API; use an OpenAI-compatible wrapper or extend separately.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ def parse_model_spec(model_string: str) -> tuple[str, str]:
             raise ValueError(
                 "For OpenAI-compatible local servers use localhost:PORT/MODEL_ID "
                 "(e.g. localhost:8000/Qwen/Qwen3-8B). "
-                "Bare localhost:PORT is Ollama-style in AI-GBS, not handled here."
+                "Bare localhost:PORT without /model is not handled here."
             )
         port, model_id = rest.split("/", 1)
         return f"http://127.0.0.1:{port}/v1", model_id
@@ -59,6 +63,66 @@ def parse_model_spec(model_string: str) -> tuple[str, str]:
     raise ValueError(
         f"Unknown model spec: {model_string!r}. "
         "Expected vllm:PORT/model, vllm/model, or localhost:PORT/model."
+    )
+
+
+def make_llm_client(
+    model_string: str,
+    *,
+    temperature: float = 0.0,
+    max_tokens: int | None = None,
+    api_key: str | None = None,
+) -> OpenAICompatibleChat:
+    """
+    Single entry point: **same CLI flag** for local vLLM, OpenAI cloud, or OpenRouter.
+
+    Resolution order:
+
+    1. ``openrouter/...`` → OpenRouter (needs ``OPENROUTER_API_KEY``).
+    2. ``vllm:...``, ``vllm/...``, ``localhost:.../...`` → :func:`parse_model_spec`.
+    3. Anything else → OpenAI official API (needs ``OPENAI_API_KEY``), after stripping optional ``openai/`` prefix.
+    """
+    s = model_string.strip()
+    if s.startswith("openrouter/"):
+        model_id = s[len("openrouter/") :].strip()
+        if not model_id:
+            raise ValueError("openrouter/ requires a model id, e.g. openrouter/qwen/qwen-2.5-72b-instruct")
+        key = api_key or os.environ.get("OPENROUTER_API_KEY")
+        if not key:
+            raise ValueError("Set OPENROUTER_API_KEY for openrouter/... model strings.")
+        return OpenAICompatibleChat(
+            base_url="https://openrouter.ai/api/v1",
+            model=model_id,
+            api_key=key,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+
+    try:
+        return OpenAICompatibleChat.from_model_spec(
+            s,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            api_key=api_key,
+        )
+    except ValueError:
+        pass
+
+    openai_model = s[7:] if s.startswith("openai/") else s
+    if not openai_model:
+        raise ValueError(f"Invalid model string: {model_string!r}")
+    key = api_key or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        raise ValueError(
+            f"Could not parse {model_string!r} as a local spec (vllm:… or localhost:port/model). "
+            "For OpenAI Cloud, set OPENAI_API_KEY and pass a model id such as gpt-4o-mini."
+        )
+    return OpenAICompatibleChat(
+        base_url="https://api.openai.com/v1",
+        model=openai_model,
+        api_key=key,
+        temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
@@ -90,6 +154,7 @@ class OpenAICompatibleChat:
         max_tokens: int | None = None,
         api_key: str | None = None,
     ) -> OpenAICompatibleChat:
+        """Local OpenAI-compatible servers only. For cloud routing use :func:`make_llm_client`."""
         base, model = parse_model_spec(model_string)
         return cls(
             base_url=base,

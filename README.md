@@ -92,12 +92,14 @@ Each run will attach a **task instance**: short scenario, **shared facts**, **pr
 
 ## Roadmap
 
-1. **Hidden-profile task generator** — Parameterized facts, who knows what, ground-truth label, optional “shared-only” ablation.  
-2. **Dyadic LLM sessions** — System + private context per agent, alternating turns, transcripts in `DyadTranscript`.  
-3. **Final decision step** — Structured output (choice + justification) per agent.  
-4. **Batch runner** — Seeds × schedules × conditions; artifacts per run.  
-5. **Metrics** — Accuracy, fact mention / transmission heuristics, convergence.  
-6. **Optional** — ToM (or similar) prompts **only on connector nodes**; parallel dyad batches via graph matchings; async client + retries (patterns from `AI-GBS`).
+**Done (v0):** hiring **task spec** (`HiringTaskSpec`, shared / cluster / bridge facts, `shared_only` vs `hidden_profile`), **LLM dyads** + **per-agent final JSON vote**, **`run` CLI** (stub or vLLM), basic **accuracy** in `run.notes`.
+
+**Next:**
+
+1. **Parameterized task generator** — Beyond the single default hiring instance; template slots and validation.  
+2. **Batch runner** — Many runs (seeds × schedules × factorial cells); directory layout + `progress.json`.  
+3. **Metrics** — Fact disclosure / transmission / integration (string or LLM-judge coding).  
+4. **Optional** — Parallel dyad matchings per timestep; async + retries; PID / alignment metrics from the design doc.
 
 ---
 
@@ -121,6 +123,47 @@ python -m gshp.cli dry-run --schedule within_first
 python -m gshp.cli dry-run --schedule cross_first --out run.json
 ```
 
+**Full hiring run (stub LLM, no API):**
+
+```bash
+python -m gshp.cli run --stub --schedule within_first --condition hidden_profile
+```
+
+**Full run against local vLLM** (OpenAI-compatible server):
+
+```bash
+python -m gshp.cli run --model vllm:8000/YourModelName --schedule cross_first --out run.json
+```
+
+Use `--condition shared_only` for the control (everyone sees only the six shared facts).  
+`--tom-bridge` adds the perspective-taking block for agents **2, 5, 8** (default bridge fact holders).
+
+**Save a full results bundle** (recommended for real runs):
+
+```bash
+python -m gshp.cli run --stub --save-artifacts
+# or
+python -m gshp.cli run --model vllm:8000/MODEL --artifact-dir path/to/my_run
+```
+
+---
+
+## Run artifacts (what gets saved)
+
+When you pass **`--save-artifacts`** or **`--artifact-dir DIR`**, the run is wrapped in a logger and the following files are written (same *idea* as classic experiment folders: config + per-step JSON + prompt/API log + summary):
+
+| File | Contents |
+|------|-----------|
+| **`config.json`** | Timestamp, topology summary, manifest (schedule, condition, model, …), task ids |
+| **`task.json`** | Full `HiringTaskSpec` (all fact texts and assignments) for reproduction |
+| **`summary.json`** | `run.notes` (accuracy, majority, …) + list of final agent votes |
+| **`llm_calls.json`** | Every LLM call: `system`, `messages`, `response`, plus metadata (`kind`: `dyad` / `final_decision`, `speaker`, `turn`, `round_label`, …) |
+| **`dyad_NNN_*.json`** | One transcript per scheduled dyad |
+| **`run.json`** | Full `ExperimentRun` (all dyads + decisions) |
+| **`game_log.txt`** | Short human-readable index of dyads and final choices |
+
+`results/` is gitignored by default.
+
 ---
 
 ## CLI reference
@@ -128,6 +171,8 @@ python -m gshp.cli dry-run --schedule cross_first --out run.json
 ```text
 python -m gshp.cli inspect [--l N] [--k N] [--kind KIND]
 python -m gshp.cli dry-run [--l N] [--k N] [--kind KIND] [--schedule within_first|cross_first] [--out PATH]
+python -m gshp.cli run [--stub | --model SPEC] [--schedule ...] [--condition hidden_profile|shared_only]
+                       [--tom-bridge] [--dyad-turns N] [--out PATH] [--save-artifacts] [--artifact-dir DIR]
 ```
 
 - **`--kind`**: `full_clique_ring` (default) | `networkx_caveman` | `networkx_connected_caveman`  
@@ -141,37 +186,48 @@ python -m gshp.cli dry-run [--l N] [--k N] [--kind KIND] [--schedule within_firs
 gshp/
   graph/
     caveman.py      # Topology: communities, intra/inter edges, connectors
+  task/
+    hiring.py       # HiringTaskSpec + build_default_hiring_task()
   schedule.py       # Two-phase communication schedules
-  runner.py         # One experiment run over a topology + schedule
-  session.py        # Dyadic sessions (stub; LLM hook pending)
-  types.py          # Pydantic models (transcripts, run manifest)
+  runner.py         # Topology + schedule only (stub dyads; for scaffolding)
+  experiment.py     # Full pipeline: task + LLM dyads + final decisions
+  session.py        # run_dyad_stub, run_dyad_llm (alternating speakers)
+  prompts.py        # Per-agent system prompts + optional ToM on 2,5,8
+  types.py          # Transcripts, manifest, AgentDecision, ExperimentRun
   llm/
-    openai_local.py # vLLM / OpenAI-compatible sync client
-  cli.py            # inspect + dry-run
+    openai_local.py   # vLLM / OpenAI-compatible sync client
+    logging_client.py # record every complete() for llm_calls.json
+    stub_client.py    # StubLLM + JSON choice parser (tests / CI)
+  artifacts.py      # write config / summary / llm_calls / dyad files / game_log
+  cli.py            # inspect, dry-run, run
 ```
 
 ---
 
-## Local LLM (vLLM)
+## One `--model` string (local vs API)
 
-vLLM exposes an **OpenAI-compatible** HTTP API. This repo uses the same **model string conventions** 
+The CLI matches the usual lab pattern: **you mostly change one argument** — `--model` — to switch backends. Optional **`--stub`** skips the network entirely.
 
-| Pattern | Behavior |
-|---------|----------|
-| `vllm:PORT/model-id` | `http://127.0.0.1:PORT/v1` + chat completions |
-| `vllm/model-id` | `$VLLM_BASE_URL` (default `http://127.0.0.1:8000/v1`) |
-| `localhost:PORT/model-id` | Same as vLLM on that port |
+| `--model` pattern | Backend | Auth |
+|-------------------|---------|------|
+| `vllm:PORT/model-id` | Local vLLM | Often `api_key` ignored (`dummy`) |
+| `vllm/model-id` | vLLM at `$VLLM_BASE_URL` | same |
+| `localhost:PORT/model-id` | Any OpenAI-compatible server on that port | optional |
+| `gpt-4o-mini` (or `openai/gpt-4o-mini`) | OpenAI cloud | `OPENAI_API_KEY` |
+| `openrouter/vendor/model-id` | OpenRouter | `OPENROUTER_API_KEY` |
 
-Example:
+**Experiment variant** is the combination of flags you already have: `--schedule`, `--condition`, `--tom-bridge`, `--kind`, etc. **Where results go** is `--artifact-dir` or `--save-artifacts` (not a separate “experiment name” registry unless you encode it in the path, e.g. `--artifact-dir results/bridge_first_hp`).
+
+Example (Python):
 
 ```python
-from gshp.llm import OpenAICompatibleChat
+from gshp.llm import make_llm_client
 
-client = OpenAICompatibleChat.from_model_spec("vllm:8000/Qwen/Qwen3-8B")
-reply = client.complete("You are a helpful assistant.", [{"role": "user", "content": "Hello."}])
+local = make_llm_client("vllm:8000/Qwen/Qwen3-8B")
+cloud = make_llm_client("gpt-4o-mini")
 ```
 
-For **async**, **retries**, **OpenRouter**, or **Ollama’s `/api/generate`**, reuse or adapt `~/AI-GBS/llm_run.py`.
+**Note:** Ollama’s native **`/api/generate`** API is not the same as `/v1/chat/completions`; use a compatible gateway or extend the router.
 
 ---
 
