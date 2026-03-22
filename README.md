@@ -88,8 +88,6 @@ Within each phase, dyads are executed **sequentially** in a fixed order (see [Ro
 
 Each run will attach a **task instance**: short scenario, **shared facts**, **private facts per agent/cluster**, and a **correct discrete choice** (e.g. hire candidate **Y**). Agents only see their own information plus what others **choose to say** in scheduled conversations.
 
-*Implementation of the generator and LLM dyads is in progress; the runner already walks the graph and schedule.*
-
 ---
 
 ## Roadmap
