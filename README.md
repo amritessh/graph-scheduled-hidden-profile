@@ -8,16 +8,24 @@ This repository implements the **software** for a multi-agent experiment: agents
 
 ## Table of contents
 
-- [Scientific background](#scientific-background)
-- [What this experiment tests](#what-this-experiment-tests)
-- [Design (high level)](#design-high-level)
-- [What is implemented today](#what-is-implemented-today)
-- [Roadmap](#roadmap)
-- [Installation & quick start](#installation--quick-start)
-- [CLI reference](#cli-reference)
-- [Project layout](#project-layout)
-- [Local LLM (vLLM)](#local-llm-vllm)
-- [References](#references)
+- [graph-scheduled-hidden-profile](#graph-scheduled-hidden-profile)
+  - [Table of contents](#table-of-contents)
+  - [Scientific background](#scientific-background)
+    - [Hidden profile](#hidden-profile)
+    - [Networks and communication *order*](#networks-and-communication-order)
+    - [Community structure (“caveman” picture)](#community-structure-caveman-picture)
+  - [What this experiment tests](#what-this-experiment-tests)
+  - [Design (high level)](#design-high-level)
+    - [Topology](#topology)
+    - [Communication schedule (main manipulation)](#communication-schedule-main-manipulation)
+    - [Task (conceptual)](#task-conceptual)
+  - [Roadmap](#roadmap)
+  - [Installation \& quick start](#installation--quick-start)
+  - [CLI reference](#cli-reference)
+  - [Project layout](#project-layout)
+  - [Local LLM (vLLM)](#local-llm-vllm)
+  - [References](#references)
+  - [License / collaboration](#license--collaboration)
 
 ---
 
@@ -81,23 +89,6 @@ Within each phase, dyads are executed **sequentially** in a fixed order (see [Ro
 Each run will attach a **task instance**: short scenario, **shared facts**, **private facts per agent/cluster**, and a **correct discrete choice** (e.g. hire candidate **Y**). Agents only see their own information plus what others **choose to say** in scheduled conversations.
 
 *Implementation of the generator and LLM dyads is in progress; the runner already walks the graph and schedule.*
-
----
-
-## What is implemented today
-
-| Component | Status |
-|-----------|--------|
-| **Community graph** | `CavemanTopology`: `full_clique_ring`, optional NX `caveman` / `connected_caveman` |
-| **Intra vs inter edges** | Computed from community partition |
-| **Connector nodes** | Identified for bridge endpoints |
-| **Schedules** | `within_first`, `cross_first` |
-| **Run orchestration** | Rounds → dyads → stub dialogue → JSON-serializable `ExperimentRun` |
-| **CLI** | `inspect`, `dry-run` |
-| **vLLM client (sync)** | `OpenAICompatibleChat` — OpenAI-compatible `/v1/chat/completions` |
-| **Hidden-profile story generator** | Not yet |
-| **Real LLM dyadic dialogue** | Not yet (stub only) |
-| **Final vote / scoring** | Not yet |
 
 ---
 
