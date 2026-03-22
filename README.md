@@ -154,7 +154,7 @@ gshp/
 
 ## Local LLM (vLLM)
 
-vLLM exposes an **OpenAI-compatible** HTTP API. This repo uses the same **model string conventions** as the related project **`AI-GBS`** (`llm_run.py`):
+vLLM exposes an **OpenAI-compatible** HTTP API. This repo uses the same **model string conventions** 
 
 | Pattern | Behavior |
 |---------|----------|
