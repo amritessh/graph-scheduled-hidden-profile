@@ -194,6 +194,7 @@ def run_batch_from_config(
     *,
     dry_run: bool = False,
     resume: bool = False,
+    overrides: dict[str, Any] | None = None,
 ) -> Path:
     """
     Execute all Cartesian products of ``grid`` lists; ``runs_per_cell`` replicates per cell.
@@ -205,6 +206,8 @@ def run_batch_from_config(
     """
     p = Path(config_path)
     cfg = load_batch_config(p)
+    if overrides:
+        cfg.update(overrides)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_dir = Path(cfg["base_dir"]) / ts
     base_dir.mkdir(parents=True, exist_ok=True)
