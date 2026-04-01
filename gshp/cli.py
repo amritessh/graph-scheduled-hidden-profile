@@ -195,7 +195,8 @@ def cmd_batch(args: argparse.Namespace) -> None:
         overrides["runs_per_cell"] = args.runs
     if args.concurrent is not None:
         overrides["concurrent_runs"] = args.concurrent
-    root = run_batch_from_config(args.config, dry_run=args.dry_run, resume=args.resume, overrides=overrides)
+    config_path = args.config or None
+    root = run_batch_from_config(config_path, dry_run=args.dry_run, resume=args.resume, overrides=overrides)
     print(f"Batch base_dir: {root}")
     if args.dry_run:
         print("(dry run: no LLM calls, index.csv + progress show planned runs)")
@@ -320,7 +321,7 @@ def main() -> None:
     px.set_defaults(func=cmd_run)
 
     pb = sub.add_parser("batch", help="Run factorial batch from JSON config (progress + index.csv)")
-    pb.add_argument("--config", type=str, required=True, help="path to batch JSON (see configs/)")
+    pb.add_argument("--config", type=str, default="", help="path to batch JSON (optional; uses built-in defaults if omitted)")
     pb.add_argument("--model", type=str, default="", help="override model in config (e.g. vllm:8000/Qwen/Qwen3-8B)")
     pb.add_argument("--runs", type=int, default=None, help="override runs_per_cell in config")
     pb.add_argument("--concurrent", type=int, default=None, help="override concurrent_runs in config")

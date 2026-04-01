@@ -47,7 +47,32 @@ def cell_slug(params: dict[str, Any]) -> str:
     return "__".join(parts)
 
 
-def load_batch_config(path: Path) -> dict[str, Any]:
+DEFAULT_BATCH_CONFIG: dict[str, Any] = {
+    "base_dir": "results",
+    "temperature": 0.7,
+    "max_tokens": 512,
+    "timeout": 120.0,
+    "max_retries": 3,
+    "runs_per_cell": 5,
+    "seed_base": 0,
+    "increment_seed_per_run": True,
+    "concurrent_runs": 5,
+    "dyad_turns": 6,
+    "parallel_dyad_layers": True,
+    "max_workers": 1,
+    "group_deliberation": True,
+    "topology": {"l": 3, "k": 3, "kind": "full_clique_ring"},
+    "grid": {
+        "schedule":   ["within_first", "cross_first"],
+        "condition":  ["hidden_profile", "shared_only"],
+        "tom_bridge": [False, True],
+    },
+}
+
+
+def load_batch_config(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return dict(DEFAULT_BATCH_CONFIG)
     data = json.loads(path.read_text(encoding="utf-8"))
     if "base_dir" not in data:
         raise ValueError("batch config requires string field: base_dir")
@@ -190,7 +215,7 @@ def _execute_one_run(
 
 
 def run_batch_from_config(
-    config_path: str | Path,
+    config_path: str | Path | None = None,
     *,
     dry_run: bool = False,
     resume: bool = False,
@@ -204,16 +229,19 @@ def run_batch_from_config(
 
     Returns the resolved ``base_dir``.
     """
-    p = Path(config_path)
+    p = Path(config_path) if config_path else None
     cfg = load_batch_config(p)
     if overrides:
         cfg.update(overrides)
+    if not cfg.get("model") and not cfg.get("stub"):
+        raise ValueError('Provide a model: --model vllm:8000/MODEL or set "model" in config.')
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_dir = Path(cfg["base_dir"]) / ts
+    model_slug = _slug(str(cfg.get("model", "stub")))
+    base_dir = Path(cfg["base_dir"]) / f"{model_slug}_{ts}"
     base_dir.mkdir(parents=True, exist_ok=True)
 
     resolved = dict(cfg)
-    resolved["_loaded_from"] = str(p.resolve())
+    resolved["_loaded_from"] = str(p.resolve()) if p else "defaults"
     resolved["_started_at"] = datetime.now().isoformat(timespec="milliseconds")
     (base_dir / "batch_config.json").write_text(
         json.dumps(resolved, indent=2, default=str), encoding="utf-8"
@@ -263,7 +291,7 @@ def run_batch_from_config(
     total = len(work_items)
     progress: dict[str, Any] = {
         "started_at": resolved["_started_at"],
-        "config_path": str(p.resolve()),
+        "config_path": str(p.resolve()) if p else "defaults",
         "base_dir": str(base_dir.resolve()),
         "total_planned": total,
         "concurrent_runs": concurrent_runs,
