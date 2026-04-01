@@ -19,6 +19,7 @@ def run_dyad_stub(
     *,
     round_index: int,
     round_label: str,
+    round_sub_index: int = 0,
     turns: int = 4,
 ) -> DyadTranscript:
     """Placeholder dialogue until vLLM is wired."""
@@ -37,6 +38,7 @@ def run_dyad_stub(
         v=max(u, v),
         round_index=round_index,
         round_label=round_label,
+        round_sub_index=round_sub_index,
         messages=msgs,
     )
 
@@ -47,6 +49,7 @@ def run_dyad_llm(
     *,
     round_index: int,
     round_label: str,
+    round_sub_index: int = 0,
     client: LLMClient,
     system_u: str,
     system_v: str,
@@ -61,6 +64,7 @@ def run_dyad_llm(
         v=max(u, v),
         round_index=round_index,
         round_label=round_label,
+        round_sub_index=round_sub_index,
         messages=[],
     )
     lines: list[str] = []
@@ -81,6 +85,7 @@ def run_dyad_llm(
                 kind="dyad",
                 round_index=round_index,
                 round_label=round_label,
+                round_sub_index=round_sub_index,
                 dyad_u=u,
                 dyad_v=v,
                 turn=t,

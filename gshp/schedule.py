@@ -18,12 +18,17 @@ class ScheduleName(str, Enum):
 
 @dataclass(frozen=True)
 class CommunicationRound:
-    """One batch of simultaneous allowed dyads (non-overlapping nodes per sub-slot optional)."""
+    """
+    One batch of dyads for phase ``index`` (intra vs inter).
+
+    ``edges`` are undirected (u, v) with u < v. ``sub_index`` numbers **parallel layers**
+    when using :func:`expand_schedule_parallel_matchings` (each layer is a matching).
+    """
 
     index: int
     label: str
-    """Undirected edges (u, v) with u < v to run in this round."""
     edges: tuple[tuple[int, int], ...]
+    sub_index: int = 0
 
 
 def build_two_phase_schedule(
@@ -53,3 +58,40 @@ def build_two_phase_schedule(
             CommunicationRound(1, "intra_community", tuple(intra)),
         )
     raise ValueError(name)
+
+
+def expand_schedule_parallel_matchings(
+    rounds: tuple[CommunicationRound, ...],
+) -> tuple[CommunicationRound, ...]:
+    """
+    Replace each phase round with several sub-rounds: edges partitioned into **matchings**
+    (no shared endpoints within a sub-round). See ``docs/algorithms.md``.
+
+    Dyads still run **sequentially** in the runner; layers document which conversations could
+    run in parallel without agent double-booking.
+    """
+    from gshp.matching_schedule import partition_edges_into_matching_layers
+
+    out: list[CommunicationRound] = []
+    for r in rounds:
+        if not r.edges:
+            out.append(
+                CommunicationRound(
+                    index=r.index,
+                    label=r.label,
+                    edges=(),
+                    sub_index=0,
+                )
+            )
+            continue
+        layers = partition_edges_into_matching_layers(r.edges)
+        for j, layer_edges in enumerate(layers):
+            out.append(
+                CommunicationRound(
+                    index=r.index,
+                    label=r.label,
+                    edges=tuple(sorted(layer_edges)),
+                    sub_index=j,
+                )
+            )
+    return tuple(out)

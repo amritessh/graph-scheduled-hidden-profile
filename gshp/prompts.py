@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+# Version string written to run ``config.json`` (``audit.prompt_template_id``).
+from gshp.audit import PROMPT_TEMPLATE_ID  # noqa: F401
+
 from gshp.graph.caveman import CavemanTopology
 from gshp.task.hiring import HiringTaskSpec, InformationCondition, cluster_index_for_agent
 
@@ -41,12 +44,13 @@ def agent_system_prompt(
 
     tom_block = ""
     if use_tom:
+        # Exact wording from study design spec (Riedl 2024)
         tom_block = (
-            "\n\nYou connect colleagues in different parts of the organization. Before you speak, "
-            "consider: What does this person likely already know about the candidates? "
-            "What important information might they be missing that you have? "
-            "What might they currently believe is true, and does your information change that? "
-            "Use this reasoning to decide what to share and how to phrase it.\n"
+            "\n\nYou connect two different groups of colleagues. Before each conversation, "
+            "consider: *What does this person likely know about the candidates? "
+            "What important information might they be missing that I have? "
+            "What do they probably think is true, and does my information change that?* "
+            "Use this reasoning to decide what to share and how to frame it.\n"
         )
 
     return (

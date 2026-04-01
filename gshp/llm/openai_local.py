@@ -19,7 +19,9 @@ Ollama’s native ``/api/generate`` is a different API; use an OpenAI-compatible
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import random
+import time
+from dataclasses import dataclass, field
 
 from openai import OpenAI
 
@@ -72,6 +74,8 @@ def make_llm_client(
     temperature: float = 0.0,
     max_tokens: int | None = None,
     api_key: str | None = None,
+    timeout: float = 120.0,
+    max_retries: int = 3,
 ) -> OpenAICompatibleChat:
     """
     Single entry point: **same CLI flag** for local vLLM, OpenAI cloud, or OpenRouter.
@@ -96,6 +100,8 @@ def make_llm_client(
             api_key=key,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
+            max_retries=max_retries,
         )
 
     try:
@@ -104,6 +110,8 @@ def make_llm_client(
             temperature=temperature,
             max_tokens=max_tokens,
             api_key=api_key,
+            timeout=timeout,
+            max_retries=max_retries,
         )
     except ValueError:
         pass
@@ -123,6 +131,8 @@ def make_llm_client(
         api_key=key,
         temperature=temperature,
         max_tokens=max_tokens,
+        timeout=timeout,
+        max_retries=max_retries,
     )
 
 
@@ -133,6 +143,9 @@ class OpenAICompatibleChat:
 
     ``api_key``: vLLM often ignores it; use ``dummy`` or set ``OPENAI_API_KEY`` if your
     gateway requires it.
+
+    ``last_completion`` is set after each successful API call (for optional raw dumps in
+    :class:`gshp.llm.logging_client.LoggingLLMClient`).
     """
 
     base_url: str
@@ -140,10 +153,33 @@ class OpenAICompatibleChat:
     api_key: str | None = None
     temperature: float = 0.0
     max_tokens: int | None = None
+    timeout: float = 120.0
+    max_retries: int = 3
+    last_completion: object | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         key = self.api_key if self.api_key is not None else os.environ.get("OPENAI_API_KEY", "dummy")
-        self._client = OpenAI(base_url=self.base_url.rstrip("/"), api_key=key)
+        self._client = OpenAI(
+            base_url=self.base_url.rstrip("/"),
+            api_key=key,
+            timeout=self.timeout,
+        )
+
+    def clone(self) -> "OpenAICompatibleChat":
+        """Return a new instance with the same config and a fresh underlying client.
+
+        Use this when running dyads in parallel — each thread needs its own
+        ``last_completion`` state so they don't race reading each other's response.
+        """
+        return OpenAICompatibleChat(
+            base_url=self.base_url,
+            model=self.model,
+            api_key=self.api_key,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            timeout=self.timeout,
+            max_retries=self.max_retries,
+        )
 
     @classmethod
     def from_model_spec(
@@ -153,6 +189,8 @@ class OpenAICompatibleChat:
         temperature: float = 0.0,
         max_tokens: int | None = None,
         api_key: str | None = None,
+        timeout: float = 120.0,
+        max_retries: int = 3,
     ) -> OpenAICompatibleChat:
         """Local OpenAI-compatible servers only. For cloud routing use :func:`make_llm_client`."""
         base, model = parse_model_spec(model_string)
@@ -162,6 +200,8 @@ class OpenAICompatibleChat:
             api_key=api_key,
             temperature=temperature,
             max_tokens=max_tokens,
+            timeout=timeout,
+            max_retries=max_retries,
         )
 
     def complete(self, system: str, messages: list[dict[str, str]]) -> str:
@@ -175,6 +215,18 @@ class OpenAICompatibleChat:
         }
         if self.max_tokens is not None:
             kwargs["max_tokens"] = self.max_tokens
-        resp = self._client.chat.completions.create(**kwargs)
-        choice = resp.choices[0].message
-        return (choice.content or "").strip()
+
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries):
+            try:
+                resp = self._client.chat.completions.create(**kwargs)
+                self.last_completion = resp
+                choice = resp.choices[0].message
+                return (choice.content or "").strip()
+            except Exception as e:
+                last_err = e
+                if attempt < self.max_retries - 1:
+                    wait = (2**attempt) + random.uniform(0, 0.5)
+                    time.sleep(wait)
+        assert last_err is not None
+        raise last_err

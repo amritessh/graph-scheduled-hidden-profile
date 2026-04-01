@@ -1,0 +1,19 @@
+{
+  "base_dir": "results/batch_stub_demo",
+  "stub": true,
+  "stub_final": "X",
+  "runs_per_cell": 1,
+  "seed_base": 100,
+  "increment_seed_per_run": true,
+  "dyad_turns": 4,
+  "topology": {
+    "l": 3,
+    "k": 3,
+    "kind": "full_clique_ring"
+  },
+  "grid": {
+    "schedule": ["within_first", "cross_first"],
+    "condition": ["hidden_profile", "shared_only"],
+    "tom_bridge": [false, true]
+  }
+}

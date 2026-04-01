@@ -37,9 +37,15 @@ def graph_full_clique_ring(l: int, k: int) -> nx.Graph:
             for b in range(a + 1, len(nodes)):
                 G.add_edge(nodes[a], nodes[b])
     for i in range(l):
-        last_i = (i + 1) * k - 1
-        first_next = ((i + 1) % l) * k
-        G.add_edge(last_i, first_next)
+        # Connect the bridge of cluster i (last node) to the bridge of the
+        # next cluster (last node of cluster i+1, wrapping around).
+        # This forms a ring of bridge-to-bridge edges, matching the study design:
+        #   A2 ↔ B2 ↔ C2 ↔ A2
+        # The OLD code connected last-of-cluster-i to FIRST-of-cluster-(i+1),
+        # which put non-bridge agents on inter-cluster edges — structurally wrong.
+        bridge_i = (i + 1) * k - 1
+        bridge_next = ((i + 1) % l + 1) * k - 1
+        G.add_edge(bridge_i, bridge_next)
     return G
 
 

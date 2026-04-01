@@ -19,6 +19,7 @@ This repository implements the **software** for a multi-agent experiment: agents
     - [Topology](#topology)
     - [Communication schedule (main manipulation)](#communication-schedule-main-manipulation)
     - [Task (conceptual)](#task-conceptual)
+    - [Algorithms (parallel layers & fact matching)](docs/algorithms.md)
   - [Roadmap](#roadmap)
   - [Installation \& quick start](#installation--quick-start)
   - [CLI reference](#cli-reference)
@@ -82,7 +83,7 @@ Two-phase schedules (Momennejad-style **ordering**):
 | **`within_first`** | All **intra-community** dyads (one round listing every such edge) | All **inter-community** (bridge) dyads |
 | **`cross_first`** | Inter-community dyads first | Intra-community dyads |
 
-Within each phase, dyads are executed **sequentially** in a fixed order (see [Roadmap](#roadmap) for optional parallel matchings).
+Within each phase, dyads are executed **sequentially** in code. Optional **`--parallel-dyads`** (or batch field **`parallel_dyad_layers`**) **splits** each phase into **matching layers**: every layer is a set of dyads with **no shared agent**, i.e. a graph **matching**—the groups you could run in parallel without double-booking anyone. See **[docs/algorithms.md](docs/algorithms.md)** for the algorithm and protocol details.
 
 ### Task (conceptual)
 
@@ -97,9 +98,9 @@ Each run will attach a **task instance**: short scenario, **shared facts**, **pr
 **Next:**
 
 1. **Parameterized task generator** — Beyond the single default hiring instance; template slots and validation.  
-2. **Batch runner** — Many runs (seeds × schedules × factorial cells); directory layout + `progress.json`.  
-3. **Metrics** — Fact disclosure / transmission / integration (string or LLM-judge coding).  
-4. **Optional** — Parallel dyad matchings per timestep; async + retries; PID / alignment metrics from the design doc.
+2. **Batch runner** — Many runs (seeds × schedules × factorial cells); directory layout + `progress.json`. *(Implemented; see below.)*  
+3. **Metrics** — Fact disclosure uses **Aho–Corasick** multi-pattern literals in `metrics.py`; LLM-judge / calibration still optional.  
+4. **Optional** — Actually **parallel matching layers** are implemented (`--parallel-dyads`); async concurrent dyads, richer retries, PID / alignment metrics remain future work.
 
 ---
 
@@ -113,6 +114,7 @@ cd graph-scheduled-hidden-profile
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[llm]"     # core + OpenAI client for vLLM; use pip install -e . for graph-only
+pip install -e ".[llm,dev]" # + pytest for invariant tests
 ```
 
 **Sanity check (no GPU / no API):**
@@ -132,37 +134,73 @@ python -m gshp.cli run --stub --schedule within_first --condition hidden_profile
 **Full run against local vLLM** (OpenAI-compatible server):
 
 ```bash
-python -m gshp.cli run --model vllm:8000/YourModelName --schedule cross_first --out run.json
+python -m gshp.cli run --model vllm:8000/YourModelName --schedule cross_first
 ```
+
+Every **`run`** always writes a **full artifact folder** (default `results/run_YYYYMMDD_HHMMSS`, or **`--artifact-dir DIR`**). Optional **`--out extra.json`** also copies the combined `run.json` to another path.
 
 Use `--condition shared_only` for the control (everyone sees only the six shared facts).  
 `--tom-bridge` adds the perspective-taking block for agents **2, 5, 8** (default bridge fact holders).
 
-**Save a full results bundle** (recommended for real runs):
-
-```bash
-python -m gshp.cli run --stub --save-artifacts
-# or
-python -m gshp.cli run --model vllm:8000/MODEL --artifact-dir path/to/my_run
-```
-
 ---
 
-## Run artifacts (what gets saved)
+## Run artifacts (always saved)
 
-When you pass **`--save-artifacts`** or **`--artifact-dir DIR`**, the run is wrapped in a logger and the following files are written (same *idea* as classic experiment folders: config + per-step JSON + prompt/API log + summary):
+Each **`run`** produces the same style of folder as typical lab code: config + per-step JSON + **every** prompt/response log + summary. There is **no** “lightweight” mode—everything is kept for analysis.
 
 | File | Contents |
 |------|-----------|
-| **`config.json`** | Timestamp, topology summary, manifest (schedule, condition, model, …), task ids |
+| **`config.json`** | **`protocol`** (formal instrument: edges, schedule, `dyad_turns`, condition, ToM flag, **`parallel_dyad_layers`**) + **`protocol_sha256`**, **`audit`** (git commit, package versions, `prompt_template_id`), topology, manifest |
 | **`task.json`** | Full `HiringTaskSpec` (all fact texts and assignments) for reproduction |
-| **`summary.json`** | `run.notes` (accuracy, majority, …) + list of final agent votes |
-| **`llm_calls.json`** | Every LLM call: `system`, `messages`, `response`, plus metadata (`kind`: `dyad` / `final_decision`, `speaker`, `turn`, `round_label`, …) |
+| **`summary.json`** | Votes, `run.notes`, **`protocol_sha256`**, **`llm_aggregate`** (call count, sum latency, token totals when API reports usage), coarse **fact-mention** counts |
+| **`metrics.json`** | Same-style analysis blob for offline tools (`analyze` command refreshes it) |
+| **`llm_calls.json`** | Every LLM call: `latency_ms`, optional top-level **`usage`**, `system`, `messages`, `response`, metadata (`kind`, `speaker`, `turn`, …), optional **`openai_completion`** |
 | **`dyad_NNN_*.json`** | One transcript per scheduled dyad |
 | **`run.json`** | Full `ExperimentRun` (all dyads + decisions) |
 | **`game_log.txt`** | Short human-readable index of dyads and final choices |
 
 `results/` is gitignored by default.
+
+**Every LLM turn** is one row in **`llm_calls.json`**. When the backend is **`OpenAICompatibleChat`**, rows include **`openai_completion`** (SDK dump) and extracted **`usage`** when present. **Stub** backends omit API-shaped fields.
+
+**Re-analyze** a folder (e.g. after changing heuristics):
+
+```bash
+python -m gshp.cli analyze results/run_YYYYMMDD_HHMMSS
+```
+
+---
+
+## Batch / factorial runs
+
+JSON config → Cartesian product of **`grid`** keys → one folder per **cell** × **`runs_per_cell`**. Each **`run_NNN/`** gets the **same full bundle** as a single CLI **`run`** (full capture always on).
+
+```bash
+python -m gshp.cli batch --config examples/batch_stub_tiny.json
+python -m gshp.cli batch --config examples/batch_stub.json --dry-run
+python -m gshp.cli batch --config examples/batch_stub_tiny.json --resume   # skip runs that already have summary.json
+```
+
+**Batch folder layout:**
+
+| Path | Purpose |
+|------|---------|
+| **`batch_config.json`** | Copy of the input config + metadata |
+| **`progress.json`** | `completed` / `failed` (with **`error_type`**: timeout, rate_limit, api_status_*, …) / **`skipped`** (when using **`--resume`**) |
+| **`index.csv`** | One row per run: `cell_id`, grid columns, `run_dir`, `status`, `accuracy`, `majority`, … |
+| **`<cell_id>/run_001/`** | Full per-run bundle (`config.json`, `task.json`, `llm_calls.json`, `dyad_*.json`, …) |
+
+**Batch JSON fields (common):**
+
+- **`base_dir`** — output root  
+- **`grid`** — object whose values are **lists** (e.g. `schedule`, `condition`, `tom_bridge`)  
+- **`runs_per_cell`**, **`seed_base`**, **`increment_seed_per_run`**  
+- **`stub`** / **`stub_final`** or **`model`** (+ optional **`temperature`**, **`max_tokens`**, **`timeout`**, **`max_retries`**)  
+- **`topology`**: `{ "l", "k", "kind" }`  
+- **`dyad_turns`**  
+- **`parallel_dyad_layers`** — optional bool (default `false`); per-cell override via a **`grid`** key of the same name if you factorial it
+
+See **`examples/batch_stub.json`** (small factorial) and **`examples/batch_stub_tiny.json`** (one cell).
 
 ---
 
@@ -170,13 +208,16 @@ When you pass **`--save-artifacts`** or **`--artifact-dir DIR`**, the run is wra
 
 ```text
 python -m gshp.cli inspect [--l N] [--k N] [--kind KIND]
-python -m gshp.cli dry-run [--l N] [--k N] [--kind KIND] [--schedule within_first|cross_first] [--out PATH]
+python -m gshp.cli dry-run [--l N] [--k N] [--kind KIND] [--schedule within_first|cross_first] [--parallel-dyads] [--out PATH]
 python -m gshp.cli run [--stub | --model SPEC] [--schedule ...] [--condition hidden_profile|shared_only]
-                       [--tom-bridge] [--dyad-turns N] [--out PATH] [--save-artifacts] [--artifact-dir DIR]
+                       [--tom-bridge] [--parallel-dyads] [--dyad-turns N] [--out PATH] [--artifact-dir DIR]
+python -m gshp.cli batch --config PATH.json [--dry-run] [--resume]
+python -m gshp.cli analyze RUN_DIR [--out PATH]
 ```
 
 - **`--kind`**: `full_clique_ring` (default) | `networkx_caveman` | `networkx_connected_caveman`  
-- **`--schedule`**: `within_first` | `cross_first`
+- **`--schedule`**: `within_first` | `cross_first`  
+- **`--parallel-dyads`**: expand each phase into **matching layers** (see [docs/algorithms.md](docs/algorithms.md))
 
 ---
 
@@ -188,7 +229,9 @@ gshp/
     caveman.py      # Topology: communities, intra/inter edges, connectors
   task/
     hiring.py       # HiringTaskSpec + build_default_hiring_task()
-  schedule.py       # Two-phase communication schedules
+  schedule.py       # Two-phase schedules + expand_schedule_parallel_matchings
+  matching_schedule.py  # Partition phase edges into matching layers (NetworkX)
+  aho_corasick.py   # Multi-pattern substring search for fact metrics
   runner.py         # Topology + schedule only (stub dyads; for scaffolding)
   experiment.py     # Full pipeline: task + LLM dyads + final decisions
   session.py        # run_dyad_stub, run_dyad_llm (alternating speakers)
@@ -199,7 +242,17 @@ gshp/
     logging_client.py # record every complete() for llm_calls.json
     stub_client.py    # StubLLM + JSON choice parser (tests / CI)
   artifacts.py      # write config / summary / llm_calls / dyad files / game_log
-  cli.py            # inspect, dry-run, run
+  batch.py          # factorial batch from JSON (progress.json, index.csv)
+  batch_errors.py   # map exceptions → error_type for progress.json
+  protocol.py       # canonical protocol dict + SHA-256
+  audit.py          # git head, package versions, prompt_template_id
+  metrics.py        # aggregate latency/tokens; fact-mention heuristic
+  analyze_run.py    # offline metrics from artifacts
+  cli.py            # inspect, dry-run, run, batch, analyze
+tests/
+  test_schedule_invariants.py  # schedule edge-types + protocol hash stability
+  test_matching_schedule.py    # matching layers + expand_schedule invariants
+  test_aho_corasick.py          # AC + fact_mention_rates vs naive substring
 ```
 
 ---
@@ -216,7 +269,7 @@ The CLI matches the usual lab pattern: **you mostly change one argument** — `-
 | `gpt-4o-mini` (or `openai/gpt-4o-mini`) | OpenAI cloud | `OPENAI_API_KEY` |
 | `openrouter/vendor/model-id` | OpenRouter | `OPENROUTER_API_KEY` |
 
-**Experiment variant** is the combination of flags you already have: `--schedule`, `--condition`, `--tom-bridge`, `--kind`, etc. **Where results go** is `--artifact-dir` or `--save-artifacts` (not a separate “experiment name” registry unless you encode it in the path, e.g. `--artifact-dir results/bridge_first_hp`).
+**Experiment variant** is the combination of flags you already have: `--schedule`, `--condition`, `--tom-bridge`, `--kind`, etc. **Where results go** defaults to **`results/run_<timestamp>`** or set **`--artifact-dir`** (e.g. `results/bridge_first_hp`).
 
 Example (Python):
 

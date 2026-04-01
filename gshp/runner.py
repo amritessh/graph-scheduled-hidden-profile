@@ -5,7 +5,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from gshp.graph.caveman import CavemanTopology
-from gshp.schedule import ScheduleName, build_two_phase_schedule
+from gshp.schedule import (
+    ScheduleName,
+    build_two_phase_schedule,
+    expand_schedule_parallel_matchings,
+)
 from gshp.session import run_dyad_stub
 from gshp.types import DyadTranscript, ExperimentRun, RunManifest
 
@@ -19,6 +23,7 @@ def run_experiment(
     *,
     dyad_fn: DyadFn | None = None,
     manifest_extras: dict | None = None,
+    parallel_dyad_layers: bool = False,
 ) -> ExperimentRun:
     """
     Execute every dyad in each communication round (sequential order within the round).
@@ -29,12 +34,15 @@ def run_experiment(
         schedule_name = ScheduleName(schedule_name)
 
     schedule = build_two_phase_schedule(topo, schedule_name)
+    if parallel_dyad_layers:
+        schedule = expand_schedule_parallel_matchings(schedule)
     dyad_fn = dyad_fn or run_dyad_stub
 
     manifest = RunManifest(
         schedule=schedule_name.value,
         l=topo.l,
         k=topo.k,
+        parallel_dyad_layers=parallel_dyad_layers,
         **(manifest_extras or {}),
     )
     run = ExperimentRun(manifest=manifest)
@@ -46,6 +54,7 @@ def run_experiment(
                 v,
                 round_index=rnd.index,
                 round_label=rnd.label,
+                round_sub_index=rnd.sub_index,
             )
             run.dyads.append(t)
 

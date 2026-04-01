@@ -1,0 +1,31 @@
+{
+  "base_dir": "results/qwen3_full_factorial",
+  "model": "vllm:8000/Qwen/Qwen3-8B",
+  "temperature": 0.7,
+  "max_tokens": 512,
+  "timeout": 120.0,
+  "max_retries": 3,
+
+  "runs_per_cell": 50,
+  "seed_base": 0,
+  "increment_seed_per_run": true,
+
+  "concurrent_runs": 30,
+
+  "dyad_turns": 6,
+  "parallel_dyad_layers": true,
+  "max_workers": 1,
+  "group_deliberation": true,
+
+  "topology": {
+    "l": 3,
+    "k": 3,
+    "kind": "full_clique_ring"
+  },
+
+  "grid": {
+    "schedule":   ["within_first", "cross_first"],
+    "condition":  ["hidden_profile", "shared_only"],
+    "tom_bridge": [false, true]
+  }
+}

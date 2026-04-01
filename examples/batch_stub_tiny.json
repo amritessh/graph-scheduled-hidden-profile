@@ -1,0 +1,14 @@
+{
+  "base_dir": "results/batch_stub_tiny",
+  "stub": true,
+  "stub_final": "Y",
+  "runs_per_cell": 1,
+  "seed_base": 0,
+  "dyad_turns": 2,
+  "topology": { "l": 3, "k": 3, "kind": "full_clique_ring" },
+  "grid": {
+    "schedule": ["within_first"],
+    "condition": ["hidden_profile"],
+    "tom_bridge": [false]
+  }
+}
