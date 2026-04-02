@@ -7,11 +7,18 @@ system prompt, message list, raw response text, and optional metadata (dyad, tur
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import Any
 
 from gshp.session import LLMClient
+
+
+def _strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks emitted by reasoning models (e.g. Qwen3)."""
+    stripped = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE).strip()
+    return stripped if stripped else text
 
 
 def _serialize_openai_completion(obj: object) -> dict[str, Any] | None:
@@ -84,8 +91,9 @@ class LoggingLLMClient:
 
     def complete(self, system: str, messages: list[dict[str, str]]) -> str:
         t0 = time.perf_counter()
-        out = self._inner.complete(system, messages)
+        raw_out = self._inner.complete(system, messages)
         latency_ms = (time.perf_counter() - t0) * 1000.0
+        out = _strip_thinking(raw_out)
         raw = getattr(self._inner, "last_completion", None)
         rec: dict[str, Any] = {
             "seq": len(self.calls),
@@ -94,6 +102,7 @@ class LoggingLLMClient:
             "system": system,
             "messages": messages,
             "response": out,
+            "raw_response": raw_out,  # keep full output with thinking for artifacts
         }
         rec.update(self._pending)
         usage = _usage_snapshot(raw)
