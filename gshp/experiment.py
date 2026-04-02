@@ -100,7 +100,8 @@ def run_hidden_profile_hiring(
                 print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — running ...", flush=True)
                 results.append(_run_one_dyad(u, v, rnd, systems, client, dyad_turns))
                 trans, _ = results[-1]
-                print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done ({len(trans.messages)} turns)", flush=True)
+                first = trans.messages[0].content[:60].replace("\n", " ") if trans.messages else ""
+                print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done  \"{first}...\"", flush=True)
 
         for (u, v), (trans, dyad_calls) in zip(rnd.edges, results):
             if use_parallel and len(rnd.edges) > 1:
