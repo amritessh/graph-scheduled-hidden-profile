@@ -54,6 +54,7 @@ def run_dyad_llm(
     system_u: str,
     system_v: str,
     turns: int = 6,
+    verbose: bool = False,
 ) -> DyadTranscript:
     """
     Alternating dyad. Each turn the **current speaker**'s system prompt is used; the user
@@ -94,6 +95,8 @@ def run_dyad_llm(
         content = client.complete(system, [{"role": "user", "content": user_msg}])
         line = f"Agent {speaker}: {content}"
         lines.append(line)
+        if verbose:
+            print(f"      Agent {speaker} (t{t+1}): {content[:120].replace(chr(10), ' ')}", flush=True)
         transcript.messages.append(
             Message(
                 role=f"agent_{speaker}",

@@ -142,6 +142,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         parallel_dyad_layers=args.parallel_dyads,
         max_workers=args.workers,
         group_deliberation=args.group_deliberation,
+        verbose=args.verbose,
     )
 
     out = Path(args.out) if args.out else None
@@ -308,6 +309,7 @@ def main() -> None:
         default="",
         help="Path to a generated task JSON (from 'generate-task'). Overrides the default hiring task.",
     )
+    px.add_argument("--verbose", action="store_true", help="print each agent turn as it arrives")
     px.add_argument("--out", type=str, default="", help="write full JSON run artifact")
     px.add_argument(
         "--artifact-dir",

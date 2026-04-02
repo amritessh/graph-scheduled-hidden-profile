@@ -34,6 +34,7 @@ def run_hidden_profile_hiring(
     parallel_dyad_layers: bool = False,
     max_workers: int = 1,
     group_deliberation: bool = False,
+    verbose: bool = False,
 ) -> ExperimentRun:
     """
     Run all scheduled dyads then query each agent for a structured hire decision.
@@ -98,7 +99,7 @@ def run_hidden_profile_hiring(
             for u, v in rnd.edges:
                 dyad_num += 1
                 print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — running ...", flush=True)
-                results.append(_run_one_dyad(u, v, rnd, systems, client, dyad_turns))
+                results.append(_run_one_dyad(u, v, rnd, systems, client, dyad_turns, verbose=verbose))
                 trans, _ = results[-1]
                 first = trans.messages[0].content[:60].replace("\n", " ") if trans.messages else ""
                 print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done  \"{first}...\"", flush=True)
@@ -186,7 +187,7 @@ def run_hidden_profile_hiring(
 # ---------------------------------------------------------------------------
 
 
-def _run_one_dyad(u, v, rnd, systems, client, dyad_turns):
+def _run_one_dyad(u, v, rnd, systems, client, dyad_turns, verbose=False):
     """Run a single dyad using the shared client. Returns (transcript, None)."""
     trans = run_dyad_llm(
         u, v,
@@ -197,6 +198,7 @@ def _run_one_dyad(u, v, rnd, systems, client, dyad_turns):
         system_u=systems[u],
         system_v=systems[v],
         turns=dyad_turns,
+        verbose=verbose,
     )
     return trans, None  # None = calls already in main client
 
