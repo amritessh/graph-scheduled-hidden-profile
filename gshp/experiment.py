@@ -83,7 +83,14 @@ def run_hidden_profile_hiring(
 
     use_parallel = max_workers > 1 and parallel_dyad_layers
 
+    total_dyads = sum(len(rnd.edges) for rnd in schedule)
+    dyad_num = 0
+    print(f"  schedule={schedule_name.value}  condition={condition.value}  tom_bridge={tom_bridge}")
+    print(f"  {total_dyads} dyads | {n} agents | {dyad_turns} turns each")
+
     for rnd in schedule:
+        layer_tag = f" L{rnd.sub_index}" if rnd.sub_index else ""
+        print(f"  Round {rnd.index} [{rnd.label}{layer_tag}] — {len(rnd.edges)} dyads")
         if use_parallel and len(rnd.edges) > 1:
             results = _run_layer_parallel(rnd, systems, client, dyad_turns, max_workers)
         else:
@@ -92,8 +99,10 @@ def run_hidden_profile_hiring(
                 for u, v in rnd.edges
             ]
 
-        for trans, dyad_calls in results:
+        for (u, v), (trans, dyad_calls) in zip(rnd.edges, results):
+            dyad_num += 1
             run.dyads.append(trans)
+            print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done ({len(trans.messages)} turns)")
             # Merge per-dyad calls into the main client's call list (parallel path)
             if dyad_calls is not None:
                 main_calls = getattr(client, "calls", None)
@@ -102,7 +111,6 @@ def run_hidden_profile_hiring(
                         call["seq"] = len(main_calls)
                         main_calls.append(call)
             # Update agent memories
-            u, v = trans.u, trans.v
             block = "\n".join(f"{m.role}: {m.content}" for m in trans.messages)
             layer_tag = f" L{rnd.sub_index}" if rnd.sub_index else ""
             agent_memory[u].append(
@@ -113,6 +121,7 @@ def run_hidden_profile_hiring(
             )
 
     # Individual decisions
+    print(f"  Collecting individual decisions ...")
     for aid in range(n):
         mem = "\n\n".join(agent_memory[aid])
         user = final_user_prompt(aid, mem)
@@ -129,9 +138,11 @@ def run_hidden_profile_hiring(
                 raw_response=raw[:8000],
             )
         )
+        print(f"    Agent {aid}: {choice or '?'} — {justification[:80]}")
 
     # Group deliberation round (optional)
     if group_deliberation:
+        print(f"  Group deliberation ...")
         mem_strings = {aid: "\n\n".join(agent_memory[aid]) for aid in range(n)}
         run.deliberation = run_group_deliberation(
             individual_decisions=run.final_decisions,
