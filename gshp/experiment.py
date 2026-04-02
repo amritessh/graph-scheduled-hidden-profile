@@ -94,25 +94,27 @@ def run_hidden_profile_hiring(
         if use_parallel and len(rnd.edges) > 1:
             results = _run_layer_parallel(rnd, systems, client, dyad_turns, max_workers)
         else:
-            results = [
-                _run_one_dyad(u, v, rnd, systems, client, dyad_turns)
-                for u, v in rnd.edges
-            ]
+            results = []
+            for u, v in rnd.edges:
+                dyad_num += 1
+                print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — running ...", flush=True)
+                results.append(_run_one_dyad(u, v, rnd, systems, client, dyad_turns))
+                trans, _ = results[-1]
+                print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done ({len(trans.messages)} turns)", flush=True)
 
         for (u, v), (trans, dyad_calls) in zip(rnd.edges, results):
-            dyad_num += 1
+            if use_parallel and len(rnd.edges) > 1:
+                dyad_num += 1
+                print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done ({len(trans.messages)} turns)", flush=True)
             run.dyads.append(trans)
-            print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done ({len(trans.messages)} turns)", flush=True)
-            # Merge per-dyad calls into the main client's call list (parallel path)
             if dyad_calls is not None:
                 main_calls = getattr(client, "calls", None)
                 if main_calls is not None:
                     for call in dyad_calls:
                         call["seq"] = len(main_calls)
                         main_calls.append(call)
-            # Update agent memories
-            block = "\n".join(f"{m.role}: {m.content}" for m in trans.messages)
             layer_tag = f" L{rnd.sub_index}" if rnd.sub_index else ""
+            block = "\n".join(f"{m.role}: {m.content}" for m in trans.messages)
             agent_memory[u].append(
                 f"--- [{rnd.label}{layer_tag}] conversation with Agent {v} ---\n{block}"
             )
