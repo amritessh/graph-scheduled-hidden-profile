@@ -7,8 +7,10 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from gshp.analyze_batch import write_batch_analysis
 from gshp.analyze_run import analyze_run_dir, write_metrics_json
 from gshp.artifacts import write_run_bundle
+from gshp.bridge_coder import bridge_coding_summary, code_bridge_conversations
 from gshp.experiment import run_hidden_profile_hiring
 from gshp.graph.caveman import CavemanTopology
 from gshp.llm.logging_client import LoggingLLMClient
@@ -71,6 +73,8 @@ def cmd_generate_task(args: argparse.Namespace) -> None:
         client,
         options=args.options.split(",") if args.options else None,
         task_id=args.task_id or None,
+        max_retries=args.max_retries,
+        min_quality_score=args.min_quality,
     )
     out = args.out or f"task_{task.task_id}.json"
     save_task(task, out)
@@ -80,6 +84,11 @@ def cmd_generate_task(args: argparse.Namespace) -> None:
     print(f"  Facts: {len(task.facts)} total ({len(task.shared_fact_ids)} shared, "
           f"{sum(len(v) for v in task.cluster_fact_ids.values())} cluster, "
           f"{len(task.bridge_agent_fact_ids)} bridge)")
+    qr = getattr(task, "quality_report", {}) or {}
+    if qr:
+        print(f"  Quality score: {qr.get('score')}  passed={qr.get('passed')}")
+        if qr.get("issues"):
+            print(f"  Quality issues: {'; '.join(qr.get('issues', []))}")
 
 
 def _model_slug(model: str) -> str:
@@ -143,7 +152,35 @@ def cmd_run(args: argparse.Namespace) -> None:
         max_workers=args.workers,
         group_deliberation=args.group_deliberation,
         verbose=args.verbose,
+        dyad_context_chars=args.dyad_context_chars,
+        final_memory_chars=args.final_memory_chars,
     )
+
+    bridge_coding_payload = None
+    if args.bridge_coding:
+        if args.stub:
+            print("Skipping bridge coding under --stub (requires a judge-capable model).")
+        else:
+            judge_model = args.bridge_coding_model or args.model
+            judge_base = make_llm_client(
+                judge_model,
+                temperature=0.0,
+                max_tokens=256,
+            )
+            judge_client = LoggingLLMClient(judge_base, capture_raw_completion=True)
+            codings = code_bridge_conversations(
+                run,
+                task,
+                topo.k,
+                judge_client,
+            )
+            bridge_coding_payload = bridge_coding_summary(codings)
+            bridge_coding_payload["judge_model"] = judge_model
+            print(
+                "Bridge coding:",
+                f"translate_rate={bridge_coding_payload.get('translate_rate', 0):.3f}",
+                f"n_turns={bridge_coding_payload.get('n_turns', 0)}",
+            )
 
     out = Path(args.out) if args.out else None
     payload = run.model_dump(mode="json")
@@ -160,10 +197,16 @@ def cmd_run(args: argparse.Namespace) -> None:
         dyad_turns=args.dyad_turns,
         tom_bridge=args.tom_bridge,
         extra_config={"capture_raw_completion": True},
+        bridge_codings=bridge_coding_payload,
     )
-    artifacts = "config, task, summary, metrics.json, fact_transmission.json, llm_calls, dyad_*.json, game_log.txt, run.json"
+    artifacts = (
+        "config, task, summary, metrics.json, dv3.json, info_gain.json, fact_transmission.json, "
+        "llm_calls, dyad_*.json, game_log.txt, run.json"
+    )
     if run.deliberation is not None:
         artifacts += ", deliberation.json"
+    if bridge_coding_payload is not None:
+        artifacts += ", bridge_coding.json"
     print(f"Artifact bundle: {root} ({artifacts})")
 
     print("--- summary ---")
@@ -186,6 +229,18 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     print(f"Wrote {written}")
     txt = json.dumps(data, indent=2)
     print(txt[:4000] + ("..." if len(txt) > 4000 else ""))
+
+
+def cmd_analyze_batch(args: argparse.Namespace) -> None:
+    out = write_batch_analysis(
+        args.batch_dir,
+        out_json=args.out_json or None,
+        out_csv=args.out_csv or None,
+        out_report=args.out_report or None,
+    )
+    print(f"Wrote {out['json']}")
+    print(f"Wrote {out['csv']}")
+    print(f"Wrote {out['report']}")
 
 
 def cmd_batch(args: argparse.Namespace) -> None:
@@ -259,6 +314,18 @@ def main() -> None:
     )
     px.add_argument("--tom-bridge", action="store_true", help="ToM-style prompt on agents 2,5,8")
     px.add_argument("--dyad-turns", type=int, default=6)
+    px.add_argument(
+        "--dyad-context-chars",
+        type=int,
+        default=5000,
+        help="Max characters of prior dialogue included per dyad turn prompt (default 5000)",
+    )
+    px.add_argument(
+        "--final-memory-chars",
+        type=int,
+        default=6500,
+        help="Max characters of per-agent memory included in final decision prompt (default 6500)",
+    )
     px.add_argument("--stub", action="store_true", help="Use stub LLM (no API)")
     px.add_argument(
         "--stub-final",
@@ -310,6 +377,23 @@ def main() -> None:
         help="Path to a generated task JSON (from 'generate-task'). Overrides the default hiring task.",
     )
     px.add_argument("--verbose", action="store_true", help="print each agent turn as it arrives")
+    px.add_argument(
+        "--bridge-coding",
+        action="store_true",
+        help=(
+            "Run post-hoc DV4 bridge communication coding (relay/filter/translate) "
+            "and write bridge_coding.json."
+        ),
+    )
+    px.add_argument(
+        "--bridge-coding-model",
+        type=str,
+        default="",
+        help=(
+            "Optional judge model for --bridge-coding (defaults to --model). "
+            "Example: gpt-4o-mini or vllm:8000/Qwen/Qwen3-8B."
+        ),
+    )
     px.add_argument("--out", type=str, default="", help="write full JSON run artifact")
     px.add_argument(
         "--artifact-dir",
@@ -351,12 +435,21 @@ def main() -> None:
                     help="Comma-separated option labels, e.g. 'X,Y,Z' (default A,B,C)")
     pg.add_argument("--task-id", type=str, default="", help="Custom task ID string")
     pg.add_argument("--out", type=str, default="", help="Output JSON path (default: task_<id>.json)")
+    pg.add_argument("--max-retries", type=int, default=5, help="Max generation retries before failing quality checks")
+    pg.add_argument("--min-quality", type=float, default=0.7, help="Minimum deterministic task quality score [0..1]")
     pg.set_defaults(func=cmd_generate_task)
 
     pa = sub.add_parser("analyze", help="Recompute metrics.json from an artifact folder")
     pa.add_argument("run_dir", type=str, help="path to results/run_* or batch cell run_001")
     pa.add_argument("--out", type=str, default="", help="write metrics JSON path (default: run_dir/metrics.json)")
     pa.set_defaults(func=cmd_analyze)
+
+    pab = sub.add_parser("analyze-batch", help="Aggregate a batch folder into condition-level summaries")
+    pab.add_argument("batch_dir", type=str, help="path to batch timestamp folder containing index.csv")
+    pab.add_argument("--out-json", type=str, default="", help="output JSON path (default: batch_dir/batch_analysis.json)")
+    pab.add_argument("--out-csv", type=str, default="", help="output CSV path (default: batch_dir/condition_summary.csv)")
+    pab.add_argument("--out-report", type=str, default="", help="output markdown report path (default: batch_dir/report.md)")
+    pab.set_defaults(func=cmd_analyze_batch)
 
     args = p.parse_args()
     args.func(args)

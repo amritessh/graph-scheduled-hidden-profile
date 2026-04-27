@@ -29,6 +29,14 @@ def analyze_run_dir(run_dir: str | Path) -> dict[str, Any]:
 
     stats = aggregate_llm_call_stats(calls)
     mentions = fact_mention_rates(facts, calls)
+    dv3_path = root / "dv3.json"
+    info_gain_path = root / "info_gain.json"
+    dv3 = {}
+    info_gain = {}
+    if dv3_path.exists():
+        dv3 = json.loads(dv3_path.read_text(encoding="utf-8"))
+    if info_gain_path.exists():
+        info_gain = json.loads(info_gain_path.read_text(encoding="utf-8"))
 
     correct = task.get("correct_candidate")
     votes = [d.get("choice") for d in run.get("final_decisions") or [] if d.get("choice")]
@@ -39,6 +47,19 @@ def analyze_run_dir(run_dir: str | Path) -> dict[str, Any]:
         "majority_vote": run.get("notes", {}).get("majority_vote"),
         "llm_aggregate": stats,
         "fact_mentions": mentions,
+        "dv3": dv3,
+        "info_gain": {
+            "total_bits_resolved": info_gain.get("total_bits_resolved"),
+            "zero_bit_rate": info_gain.get("zero_bit_rate"),
+            "resolved_to_single_option": info_gain.get("resolved_to_single_option"),
+            "final_feasible_options": info_gain.get("final_feasible_options"),
+            "total_positive_pairwise_synergy_bits": (
+                (info_gain.get("shapley") or {}).get("total_positive_pairwise_synergy_bits")
+            ),
+            "total_negative_pairwise_redundancy_bits": (
+                (info_gain.get("shapley") or {}).get("total_negative_pairwise_redundancy_bits")
+            ),
+        },
         "vote_counts": _vote_counts(votes),
     }
     return out

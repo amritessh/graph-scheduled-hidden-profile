@@ -37,6 +37,17 @@ class HiringTaskSpec(BaseModel):
         default_factory=dict,
         description="agent_id -> single bridge fact id (cross-cluster linking)",
     )
+    fact_eliminates: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="fact_id -> options ruled out by this fact under hard-elimination scoring",
+    )
+    interaction_eliminates: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "fact-combination rule -> options ruled out only when all listed facts are known. "
+            "Key format: 'fid_a+fid_b[+fid_c]' with fact ids sorted lexicographically."
+        ),
+    )
 
     def fact_lines_for_agent(
         self,
@@ -93,6 +104,35 @@ def build_default_hiring_task() -> HiringTaskSpec:
             2: "b2_link",
             5: "b5_link",
             8: "b8_link",
+        },
+        fact_eliminates={
+            # Shared facts mostly strengthen X but do not decisively eliminate alternatives.
+            "s_x1": [],
+            "s_x2": [],
+            "s_x3": [],
+            "s_x4": [],
+            "s_y1": [],
+            "s_z1": [],
+            # Cluster-unique facts provide direct elimination evidence.
+            "c0_y1": ["X"],
+            "c0_y2": ["X"],
+            "c1_y1": ["X"],
+            "c1_y2": ["X"],
+            "c2_y1": ["Z"],
+            "c2_y2": ["X"],
+            # Bridge linking facts are modeled as synergistic (no solo elimination).
+            "b2_link": [],
+            "b5_link": [],
+            "b8_link": [],
+        },
+        interaction_eliminates={
+            # Bridge facts become task-relevant when paired with cluster evidence.
+            "b2_link+c0_y1": ["X"],
+            "b2_link+c1_y1": ["X"],
+            "b5_link+c1_y2": ["X"],
+            "b5_link+c2_y2": ["X"],
+            "b8_link+c0_y2": ["X"],
+            "b8_link+c2_y1": ["Z"],
         },
     )
 

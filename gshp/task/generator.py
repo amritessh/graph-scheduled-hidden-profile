@@ -58,6 +58,18 @@ class HiddenProfileTaskSpec(BaseModel):
 
     # Optional: why each option is right/wrong (for ground-truth analysis)
     option_rationale: dict[str, str] = Field(default_factory=dict)
+    quality_report: dict[str, Any] = Field(default_factory=dict)
+    fact_eliminates: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description="fact_id -> options ruled out by this fact (hard elimination analysis)",
+    )
+    interaction_eliminates: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "combination-only elimination rules. Key format: 'fid_a+fid_b[+fid_c]' "
+            "with fact ids sorted lexicographically."
+        ),
+    )
 
     def fact_lines_for_agent(
         self,
@@ -174,6 +186,30 @@ def _build_user_prompt(
             "{bridge_agent_ids[0]}": "bridge_{bridge_agent_ids[0]}",
             "{bridge_agent_ids[1]}": "bridge_{bridge_agent_ids[1]}",
             "{bridge_agent_ids[2]}": "bridge_{bridge_agent_ids[2]}"
+          }},
+          "fact_eliminates": {{
+            "s_a1": [],
+            "s_a2": [],
+            "s_a3": [],
+            "s_a4": [],
+            "s_b1": [],
+            "s_c1": [],
+            "c0_b1": ["{opts[0]}"],
+            "c0_b2": ["{opts[0]}"],
+            "c1_b1": ["{opts[0]}"],
+            "c1_b2": ["{opts[0]}"],
+            "c2_b1": ["{opts[2]}"],
+            "c2_b2": ["{opts[0]}"],
+            "bridge_{bridge_agent_ids[0]}": [],
+            "bridge_{bridge_agent_ids[1]}": [],
+            "bridge_{bridge_agent_ids[2]}": []
+          }},
+          "interaction_eliminates": {{
+            "bridge_{bridge_agent_ids[0]}+c0_b1": ["{opts[0]}"],
+            "bridge_{bridge_agent_ids[0]}+c1_b1": ["{opts[0]}"],
+            "bridge_{bridge_agent_ids[1]}+c1_b2": ["{opts[0]}"],
+            "bridge_{bridge_agent_ids[1]}+c2_b2": ["{opts[0]}"],
+            "bridge_{bridge_agent_ids[2]}+c2_b1": ["{opts[2]}"]
           }}
         }}
 
@@ -235,7 +271,126 @@ def _validate_and_coerce(data: dict[str, Any], bridge_agent_ids: list[int]) -> d
     if missing:
         raise ValueError(f"Generated task references fact IDs not in facts dict: {missing}")
 
+    # Ensure elimination maps exist and reference valid options/facts.
+    options = list(data.get("options", []))
+    valid_opts = set(options)
+    fe = data.get("fact_eliminates") or {}
+    cleaned_fe: dict[str, list[str]] = {}
+    for fid, opts in fe.items():
+        if fid not in facts:
+            continue
+        keep = [o for o in (opts or []) if o in valid_opts]
+        cleaned_fe[fid] = keep
+    for fid in facts:
+        cleaned_fe.setdefault(fid, [])
+    data["fact_eliminates"] = cleaned_fe
+
+    ie = data.get("interaction_eliminates") or {}
+    cleaned_ie: dict[str, list[str]] = {}
+    for key, opts in ie.items():
+        fids = [x.strip() for x in str(key).split("+") if x.strip()]
+        if not fids or any(fid not in facts for fid in fids):
+            continue
+        norm_key = "+".join(sorted(fids))
+        keep = [o for o in (opts or []) if o in valid_opts]
+        cleaned_ie[norm_key] = keep
+    data["interaction_eliminates"] = cleaned_ie
+
     return data
+
+
+def _quality_report(data: dict[str, Any]) -> dict[str, Any]:
+    """
+    Deterministic quality checks for generated tasks.
+
+    A task should satisfy:
+    - shared facts do NOT strongly eliminate options (attractor remains plausible)
+    - unique+bridge facts are sufficient to eliminate to one option
+    - correct option survives all elimination rules
+    """
+    facts = data.get("facts", {}) or {}
+    options = list(data.get("options", []) or [])
+    correct = str(data.get("correct_option", "")).strip()
+    shared = list(data.get("shared_fact_ids", []) or [])
+    cluster_map = data.get("cluster_fact_ids", {}) or {}
+    bridge_map = data.get("bridge_agent_fact_ids", {}) or {}
+    fact_elim = data.get("fact_eliminates", {}) or {}
+    interaction_elim = data.get("interaction_eliminates", {}) or {}
+
+    issues: list[str] = []
+    score = 1.0
+
+    if correct not in options:
+        issues.append("correct_option is not in options")
+        score -= 0.5
+
+    # Shared facts should not collapse the answer set.
+    shared_elims = set()
+    for fid in shared:
+        shared_elims.update(x for x in fact_elim.get(fid, []) if x in options)
+    remaining_after_shared = [o for o in options if o not in shared_elims]
+    if len(remaining_after_shared) <= 1:
+        issues.append("shared facts over-determine outcome (attractor too strong/decisive)")
+        score -= 0.4
+
+    # Full known facts should isolate to one answer and preserve correctness.
+    all_facts = set(facts.keys())
+    remaining_full = _apply_elimination_rules(
+        options,
+        all_facts,
+        fact_elim,
+        interaction_elim,
+    )
+    if len(remaining_full) != 1:
+        issues.append("full information does not reduce to a unique answer")
+        score -= 0.4
+    elif remaining_full[0] != correct:
+        issues.append("full information resolves to non-correct option")
+        score -= 0.4
+
+    if correct not in remaining_after_shared:
+        issues.append("shared facts eliminate the correct option outright")
+        score -= 0.3
+
+    # Unique facts should add elimination power beyond shared baseline.
+    unique_fact_ids = set()
+    for fids in cluster_map.values():
+        unique_fact_ids.update(fids or [])
+    unique_fact_ids.update(bridge_map.values())
+    remaining_shared_unique = _apply_elimination_rules(
+        options,
+        set(shared) | unique_fact_ids,
+        fact_elim,
+        interaction_elim,
+    )
+    if len(remaining_shared_unique) >= len(remaining_after_shared):
+        issues.append("unique facts provide little/no additional elimination power")
+        score -= 0.2
+
+    return {
+        "score": max(0.0, score),
+        "passed": score >= 0.7 and not issues,
+        "issues": issues,
+        "remaining_after_shared": remaining_after_shared,
+        "remaining_with_all_facts": remaining_full,
+        "n_unique_facts": len(unique_fact_ids),
+    }
+
+
+def _apply_elimination_rules(
+    options: list[str],
+    seen_facts: set[str],
+    fact_eliminates: dict[str, list[str]],
+    interaction_eliminates: dict[str, list[str]],
+) -> list[str]:
+    feasible = set(options)
+    for fid in seen_facts:
+        feasible -= set(x for x in (fact_eliminates.get(fid) or []) if x in feasible)
+    for key, elim in interaction_eliminates.items():
+        needed = {x.strip() for x in str(key).split("+") if x.strip()}
+        if needed and needed.issubset(seen_facts):
+            feasible -= set(x for x in (elim or []) if x in feasible)
+    return sorted(feasible)
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +407,7 @@ def generate_hidden_profile_task(
     options: list[str] | None = None,
     task_id: str | None = None,
     max_retries: int = 3,
+    min_quality_score: float = 0.7,
 ) -> HiddenProfileTaskSpec:
     """
     Generate an arbitrary hidden profile task for ``domain`` using ``client``.
@@ -296,8 +452,15 @@ def generate_hidden_profile_task(
             raw = client.complete(_SYSTEM_PROMPT, [{"role": "user", "content": user_prompt}])
             data = _parse_response(raw)
             data = _validate_and_coerce(data, bridge_agent_ids)
+            quality = _quality_report(data)
+            if quality["score"] < min_quality_score:
+                raise ValueError(
+                    f"Generated task failed quality threshold ({quality['score']:.3f} < {min_quality_score:.3f}): "
+                    + "; ".join(quality["issues"])
+                )
             data["task_id"] = task_id
             data["domain"] = domain
+            data["quality_report"] = quality
             return HiddenProfileTaskSpec(**data)
         except Exception as e:
             last_err = e

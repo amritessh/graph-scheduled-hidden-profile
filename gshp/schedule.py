@@ -44,7 +44,7 @@ def build_two_phase_schedule(
     if isinstance(name, str):
         name = ScheduleName(name)
 
-    intra = topo.edges_for_round_kind("intra")
+    intra = _augment_intra_edges_for_exposure(topo, topo.edges_for_round_kind("intra"))
     inter = topo.edges_for_round_kind("inter")
 
     if name == ScheduleName.WITHIN_FIRST:
@@ -58,6 +58,35 @@ def build_two_phase_schedule(
             CommunicationRound(1, "intra_community", tuple(intra)),
         )
     raise ValueError(name)
+
+
+def _augment_intra_edges_for_exposure(
+    topo: CavemanTopology,
+    intra_edges: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """
+    Keep phase edge *types* intact while matching intended per-agent exposure.
+
+    In the default 3x3 ring (l=3, k=3), bridge agents naturally have 4 total dyads
+    (2 intra + 2 inter), while non-bridge agents only have 2 (intra only).
+    To match the study protocol target (4 conversations per agent), we repeat the
+    non-bridge pair inside each cluster twice. This adds +2 dyads for each non-bridge
+    agent without introducing any extra inter-cluster links.
+    """
+    if topo.k != 3:
+        return intra_edges
+
+    edges = list(intra_edges)
+    for cluster in topo.communities:
+        bridge = max(cluster)  # ring bridge endpoint for this cluster
+        non_bridge = sorted(n for n in cluster if n != bridge)
+        if len(non_bridge) != 2:
+            continue
+        pair = (non_bridge[0], non_bridge[1])
+        # Two repeats: each non-bridge gets +2 dyads (2 -> 4 total).
+        edges.append(pair)
+        edges.append(pair)
+    return edges
 
 
 def expand_schedule_parallel_matchings(

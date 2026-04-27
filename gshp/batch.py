@@ -22,6 +22,7 @@ from typing import Any
 
 from gshp.batch_errors import classify_error
 from gshp.artifacts import write_run_bundle
+from gshp.bridge_coder import bridge_coding_summary, code_bridge_conversations
 from gshp.experiment import run_hidden_profile_hiring
 from gshp.graph.caveman import CavemanTopology
 from gshp.llm.logging_client import LoggingLLMClient
@@ -58,9 +59,13 @@ DEFAULT_BATCH_CONFIG: dict[str, Any] = {
     "increment_seed_per_run": True,
     "concurrent_runs": 5,
     "dyad_turns": 6,
+    "dyad_context_chars": 5000,
+    "final_memory_chars": 6500,
     "parallel_dyad_layers": True,
     "max_workers": 1,
     "group_deliberation": True,
+    "bridge_coding": False,
+    "bridge_coding_model": "",
     "topology": {"l": 3, "k": 3, "kind": "full_clique_ring"},
     "grid": {
         "schedule":   ["within_first", "cross_first"],
@@ -104,6 +109,8 @@ def _execute_one_run(
     k = int(topo_cfg.get("k", 3))
     kind = str(topo_cfg.get("kind", "full_clique_ring"))
     dyad_turns = int(cfg.get("dyad_turns", 6))
+    dyad_context_chars = int(cfg.get("dyad_context_chars", 5000))
+    final_memory_chars = int(cfg.get("final_memory_chars", 6500))
     parallel_dyad_layers_default = bool(cfg.get("parallel_dyad_layers", False))
     stub = bool(cfg.get("stub", False))
     stub_final = str(cfg.get("stub_final", "X")).upper()
@@ -171,7 +178,29 @@ def _execute_one_run(
             parallel_dyad_layers=parallel_dyad_layers,
             max_workers=int(cfg.get("max_workers", 1)),
             group_deliberation=bool(cfg.get("group_deliberation", False)),
+            dyad_context_chars=dyad_context_chars,
+            final_memory_chars=final_memory_chars,
         )
+
+        bridge_coding_payload = None
+        if bool(cfg.get("bridge_coding", False)) and not stub:
+            judge_model = str(cfg.get("bridge_coding_model", "") or model_label)
+            judge_base = make_llm_client(
+                judge_model,
+                temperature=0.0,
+                max_tokens=256,
+                timeout=timeout,
+                max_retries=max_retries_client,
+            )
+            judge_client = LoggingLLMClient(judge_base, capture_raw_completion=True)
+            codings = code_bridge_conversations(
+                exp_run,
+                task_template,
+                topo.k,
+                judge_client,
+            )
+            bridge_coding_payload = bridge_coding_summary(codings)
+            bridge_coding_payload["judge_model"] = judge_model
 
         write_run_bundle(
             run_dir,
@@ -186,6 +215,7 @@ def _execute_one_run(
                 "batch_seed": seed,
                 "capture_raw_completion": True,
             },
+            bridge_codings=bridge_coding_payload,
         )
 
         row["status"] = "ok"

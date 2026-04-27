@@ -55,6 +55,7 @@ def run_dyad_llm(
     system_v: str,
     turns: int = 6,
     verbose: bool = False,
+    max_context_chars: int = 5000,
 ) -> DyadTranscript:
     """
     Alternating dyad. Each turn the **current speaker**'s system prompt is used; the user
@@ -73,7 +74,7 @@ def run_dyad_llm(
     for t in range(turns):
         speaker = u if t % 2 == 0 else v
         system = system_u if speaker == u else system_v
-        so_far = "\n".join(lines) if lines else "(No messages yet — open the discussion.)"
+        so_far = _truncate_dialogue_context(lines, max_chars=max_context_chars)
         user_msg = (
             f"You are Agent {speaker}. You are speaking privately with one colleague.\n\n"
             f"Conversation so far:\n{so_far}\n\n"
@@ -106,3 +107,21 @@ def run_dyad_llm(
         )
 
     return transcript
+
+
+def _truncate_dialogue_context(lines: list[str], *, max_chars: int) -> str:
+    """
+    Keep recent conversational context bounded to avoid model context overflow.
+
+    The transcript stored in artifacts remains full; only the per-turn prompt
+    context is trimmed.
+    """
+    if not lines:
+        return "(No messages yet — open the discussion.)"
+    if max_chars <= 0:
+        return "\n".join(lines)
+    full = "\n".join(lines)
+    if len(full) <= max_chars:
+        return full
+    tail = full[-max_chars:]
+    return "[Earlier conversation omitted for length]\n" + tail

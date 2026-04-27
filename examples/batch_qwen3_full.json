@@ -2,7 +2,7 @@
   "base_dir": "results/qwen3_full_factorial",
   "model": "vllm:8000/Qwen/Qwen3-8B",
   "temperature": 0.7,
-  "max_tokens": 512,
+  "max_tokens": 192,
   "timeout": 120.0,
   "max_retries": 3,
 
@@ -13,6 +13,8 @@
   "concurrent_runs": 30,
 
   "dyad_turns": 6,
+  "dyad_context_chars": 5000,
+  "final_memory_chars": 6500,
   "parallel_dyad_layers": true,
   "max_workers": 1,
   "group_deliberation": true,

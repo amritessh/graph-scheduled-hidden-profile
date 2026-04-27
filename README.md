@@ -50,7 +50,7 @@ ground truth and a full factorial design.
 
 - **DV1** — Decision accuracy: proportion choosing the correct candidate (Y)
 - **DV2** — Unique-fact utilization: disclosure / transmission / integration rates (Aho-Corasick)
-- **DV3** — Convergence vs alignment: convergence (% agreement) + PID alignment (Riedl's framework)
+- **DV3** — Convergence vs alignment + entropy-reduction information gain (hard elimination + Shapley decomposition)
 - **DV4** — Bridge communication quality: relay / filter / translate coding (LLM judge)
 
 ---
@@ -178,6 +178,10 @@ python -m gshp.cli generate-task  --domain "medical diagnosis"
                                   [--task-id ID]
                                   [--out PATH]
 python -m gshp.cli analyze        RUN_DIR [--out PATH]
+python -m gshp.cli analyze-batch  BATCH_DIR
+                                  [--out-json PATH]
+                                  [--out-csv PATH]
+                                  [--out-report PATH]
 ```
 
 **`--model` string format:**
@@ -260,6 +264,8 @@ Every run (single or batch) writes the same full bundle — no lightweight mode.
 | `task.json` | Full task spec (all fact texts and assignments) for reproducibility |
 | `summary.json` | Votes, accuracy, majority, unanimous_correct, deliberation outcome |
 | `metrics.json` | LLM aggregate stats, fact mention rates, notes |
+| `dv3.json` | Convergence/alignment dissociation metrics (overall + by cluster) |
+| `info_gain.json` | Entropy trajectory, per-message ΔH, waste, agent/category bits, Shapley interaction decomposition |
 | `llm_calls.json` | Every LLM call: prompt, response, latency, usage, raw OpenAI completion |
 | `run.json` | Full serialized `ExperimentRun` (all dyads + decisions) |
 | `dyad_NNN_label.json` | One transcript per dyadic conversation |
@@ -272,6 +278,27 @@ Every run (single or batch) writes the same full bundle — no lightweight mode.
 
 ```bash
 python -m gshp.cli analyze results/hidden_profile_experiment_vllm_8000_Qwen_Qwen3-8B_20260331_214411
+```
+
+**Aggregate a full batch (condition-level report):**
+
+```bash
+python -m gshp.cli analyze-batch results/qwen3_full_factorial/vllm_8000_Qwen_Qwen3-8B_20260426_120000
+```
+
+This writes:
+- `batch_analysis.json` (full aggregate)
+- `condition_summary.csv` (one row per factorial cell)
+- `report.md` (quick meeting-ready summary)
+- `paper_tables.json` (key factorial contrasts + bootstrap CIs)
+- `paper_report.md` (interpretation-oriented summary)
+
+Convenience wrapper (auto-picks latest batch folder if omitted):
+
+```bash
+bash scripts/post_run_analysis.sh
+# or:
+bash scripts/post_run_analysis.sh results/qwen3_full_factorial/<batch_folder>
 ```
 
 ---

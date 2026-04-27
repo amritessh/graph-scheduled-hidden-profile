@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import networkx as nx
 
 
@@ -26,19 +28,22 @@ def partition_edges_into_matching_layers(
 
     Empty input returns an empty list.
     """
-    remaining: set[tuple[int, int]] = {_normalize_edge(e) for e in edges}
+    remaining: Counter[tuple[int, int]] = Counter(_normalize_edge(e) for e in edges)
     layers: list[tuple[tuple[int, int], ...]] = []
-    while remaining:
+    while any(c > 0 for c in remaining.values()):
         g = nx.Graph()
-        g.add_edges_from(remaining)
+        g.add_edges_from([e for e, c in remaining.items() if c > 0])
         # Unweighted maximum-cardinality matching (general graphs).
         raw = nx.max_weight_matching(g, maxcardinality=True)
         layer_set = {_normalize_edge((int(u), int(v))) for u, v in raw}
         if not layer_set:
             raise RuntimeError(
                 "max_weight_matching returned empty while edges remain; "
-                f"remaining={sorted(remaining)[:20]!s}..."
+                f"remaining={sorted([e for e, c in remaining.items() if c > 0])[:20]!s}..."
             )
         layers.append(tuple(sorted(layer_set)))
-        remaining -= layer_set
+        for e in layer_set:
+            remaining[e] -= 1
+            if remaining[e] <= 0:
+                del remaining[e]
     return layers

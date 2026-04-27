@@ -18,8 +18,10 @@ from pathlib import Path
 from typing import Any
 
 from gshp.audit import audit_metadata
+from gshp.dv3 import convergence_alignment_by_cluster, convergence_alignment_metrics
 from gshp.fact_tracker import analyze_fact_transmission, fact_transmission_summary
 from gshp.graph.caveman import CavemanTopology
+from gshp.info_gain import analyze_information_gain
 from gshp.metrics import aggregate_llm_call_stats, fact_mention_rates
 from gshp.protocol import canonical_protocol_dict, protocol_sha256
 from gshp.task.hiring import HiringTaskSpec, InformationCondition
@@ -36,7 +38,7 @@ def write_run_bundle(
     dyad_turns: int,
     tom_bridge: bool,
     extra_config: dict[str, Any] | None = None,
-    bridge_codings: list[dict[str, Any]] | None = None,
+    bridge_codings: dict[str, Any] | None = None,
 ) -> Path:
     """
     Create ``results_dir`` and write all artifact files. Returns the resolved path.
@@ -147,6 +149,35 @@ def write_run_bundle(
             json.dumps(run.deliberation.model_dump(mode="json"), indent=2),
             encoding="utf-8",
         )
+
+    # DV3: convergence/alignment dissociation metrics
+    dv3_overall = convergence_alignment_metrics(
+        run,
+        correct_choice=task.correct_candidate,
+    )
+    dv3_clusters = convergence_alignment_by_cluster(
+        run.final_decisions,
+        topo_l=topo.l,
+        topo_k=topo.k,
+        correct_choice=task.correct_candidate,
+    )
+    (root / "dv3.json").write_text(
+        json.dumps(
+            {
+                "overall": dv3_overall,
+                "by_cluster": dv3_clusters,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    # Entropy-reduction information-gain analysis + Shapley attribution
+    info_gain = analyze_information_gain(run, task)
+    (root / "info_gain.json").write_text(
+        json.dumps(info_gain, indent=2),
+        encoding="utf-8",
+    )
 
     # DV4: bridge coding (optional, provided externally)
     if bridge_codings is not None:

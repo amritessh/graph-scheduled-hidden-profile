@@ -5,6 +5,7 @@ from __future__ import annotations
 import concurrent.futures
 from collections import Counter
 
+from gshp.dv3 import convergence_alignment_metrics
 from gshp.deliberation import run_group_deliberation
 from gshp.graph.caveman import CavemanTopology
 from gshp.llm.logging_client import LoggingLLMClient
@@ -35,6 +36,8 @@ def run_hidden_profile_hiring(
     max_workers: int = 1,
     group_deliberation: bool = False,
     verbose: bool = False,
+    dyad_context_chars: int = 5000,
+    final_memory_chars: int = 6500,
 ) -> ExperimentRun:
     """
     Run all scheduled dyads then query each agent for a structured hire decision.
@@ -93,13 +96,22 @@ def run_hidden_profile_hiring(
         layer_tag = f" L{rnd.sub_index}" if rnd.sub_index else ""
         print(f"  Round {rnd.index} [{rnd.label}{layer_tag}] — {len(rnd.edges)} dyads", flush=True)
         if use_parallel and len(rnd.edges) > 1:
-            results = _run_layer_parallel(rnd, systems, client, dyad_turns, max_workers)
+            results = _run_layer_parallel(
+                rnd, systems, client, dyad_turns, max_workers,
+                dyad_context_chars=dyad_context_chars,
+            )
         else:
             results = []
             for u, v in rnd.edges:
                 dyad_num += 1
                 print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — running ...", flush=True)
-                results.append(_run_one_dyad(u, v, rnd, systems, client, dyad_turns, verbose=verbose))
+                results.append(
+                    _run_one_dyad(
+                        u, v, rnd, systems, client, dyad_turns,
+                        verbose=verbose,
+                        dyad_context_chars=dyad_context_chars,
+                    )
+                )
                 trans, _ = results[-1]
                 first = trans.messages[0].content[:60].replace("\n", " ") if trans.messages else ""
                 print(f"    [{dyad_num}/{total_dyads}] Agent {u} <-> Agent {v} — done  \"{first}...\"", flush=True)
@@ -127,7 +139,7 @@ def run_hidden_profile_hiring(
     # Individual decisions
     print(f"  Collecting individual decisions ...", flush=True)
     for aid in range(n):
-        mem = "\n\n".join(agent_memory[aid])
+        mem = _compress_agent_memory(agent_memory[aid], max_chars=final_memory_chars)
         user = final_user_prompt(aid, mem)
         _meta = getattr(client, "set_call_meta", None)
         if callable(_meta):
@@ -147,7 +159,10 @@ def run_hidden_profile_hiring(
     # Group deliberation round (optional)
     if group_deliberation:
         print(f"  Group deliberation ...", flush=True)
-        mem_strings = {aid: "\n\n".join(agent_memory[aid]) for aid in range(n)}
+        mem_strings = {
+            aid: _compress_agent_memory(agent_memory[aid], max_chars=final_memory_chars)
+            for aid in range(n)
+        }
         run.deliberation = run_group_deliberation(
             individual_decisions=run.final_decisions,
             agent_memories=mem_strings,
@@ -170,6 +185,13 @@ def run_hidden_profile_hiring(
     )
     run.notes["unanimous_correct"] = bool(votes) and all(c == correct for c in votes)
     run.notes["majority_vote"] = _majority(votes) if votes else None
+    dv3 = convergence_alignment_metrics(run, correct_choice=correct)
+    run.notes["dv3_pairwise_convergence"] = dv3.get("pairwise_convergence")
+    run.notes["dv3_alignment_accuracy"] = dv3.get("alignment_accuracy")
+    run.notes["dv3_dissociation_gap"] = dv3.get("dissociation_gap")
+    # Legacy aliases kept for downstream notebooks.
+    run.notes["convergence_pairwise"] = dv3.get("pairwise_convergence")
+    run.notes["alignment_accuracy"] = dv3.get("alignment_accuracy")
 
     if run.deliberation:
         g_votes = [d.choice for d in run.deliberation.group_decisions if d.choice]
@@ -187,7 +209,7 @@ def run_hidden_profile_hiring(
 # ---------------------------------------------------------------------------
 
 
-def _run_one_dyad(u, v, rnd, systems, client, dyad_turns, verbose=False):
+def _run_one_dyad(u, v, rnd, systems, client, dyad_turns, verbose=False, dyad_context_chars=5000):
     """Run a single dyad using the shared client. Returns (transcript, None)."""
     trans = run_dyad_llm(
         u, v,
@@ -199,6 +221,7 @@ def _run_one_dyad(u, v, rnd, systems, client, dyad_turns, verbose=False):
         system_v=systems[v],
         turns=dyad_turns,
         verbose=verbose,
+        max_context_chars=dyad_context_chars,
     )
     return trans, None  # None = calls already in main client
 
@@ -226,7 +249,7 @@ def _make_dyad_client(main_client) -> tuple[object, bool]:
     return LoggingLLMClient(dyad_inner, capture_raw_completion=capture_raw), True
 
 
-def _run_layer_parallel(rnd, systems, client, dyad_turns, max_workers):
+def _run_layer_parallel(rnd, systems, client, dyad_turns, max_workers, dyad_context_chars=5000):
     """
     Run all dyads in a matching layer concurrently.
 
@@ -246,6 +269,7 @@ def _run_layer_parallel(rnd, systems, client, dyad_turns, max_workers):
             system_u=systems[u],
             system_v=systems[v],
             turns=dyad_turns,
+            max_context_chars=dyad_context_chars,
         )
         return trans, dyad_client.calls
 
@@ -260,3 +284,31 @@ def _majority(votes: list[str]) -> str | None:
     if not votes:
         return None
     return Counter(votes).most_common(1)[0][0]
+
+
+def _compress_agent_memory(blocks: list[str], *, max_chars: int) -> str:
+    """
+    Bound final-decision memory while preserving multi-round structure.
+
+    Keeps complete recent blocks and trims oldest content first.
+    """
+    if not blocks:
+        return ""
+    if max_chars <= 0:
+        return "\n\n".join(blocks)
+    text = "\n\n".join(blocks)
+    if len(text) <= max_chars:
+        return text
+    kept: list[str] = []
+    used = 0
+    for block in reversed(blocks):
+        add = len(block) + (2 if kept else 0)
+        if used + add > max_chars:
+            break
+        kept.append(block)
+        used += add
+    kept = list(reversed(kept))
+    if not kept:
+        tail = text[-max_chars:]
+        return "[Earlier conversations omitted for length]\n" + tail
+    return "[Some earlier conversations omitted for length]\n\n" + "\n\n".join(kept)
