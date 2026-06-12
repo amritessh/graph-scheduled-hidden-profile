@@ -231,6 +231,123 @@ def cmd_analyze(args: argparse.Namespace) -> None:
     print(txt[:4000] + ("..." if len(txt) > 4000 else ""))
 
 
+def cmd_code_bridges(args: argparse.Namespace) -> None:
+    import time
+    from gshp.bridge_coder import code_bridge_conversations, bridge_coding_summary
+    from gshp.task.hiring import build_default_hiring_task
+    from gshp.types import ExperimentRun
+
+    task = build_default_hiring_task()
+    topo_k = 3
+    client = make_llm_client(args.model, temperature=0.0, max_tokens=256)
+
+    batch_dir = Path(args.batch_dir)
+    run_jsons = sorted(p for p in batch_dir.rglob("run.json") if p.parent.is_dir())
+    if not run_jsons:
+        print(f"No run.json found under {batch_dir}")
+        return
+
+    total = len(run_jsons)
+    print(f"Coding bridge conversations for {total} runs with {args.model} ...", flush=True)
+    done = 0
+    t_start = time.time()
+    actual_done = 0
+
+    for run_json in run_jsons:
+        run_dir = run_json.parent
+        out_path = run_dir / "bridge_coding.json"
+        if out_path.exists() and not args.force:
+            done += 1
+            continue
+
+        # skip shared_only — no unique bridge facts
+        cell = run_dir.parent.name
+        if "shared_only" in cell:
+            done += 1
+            continue
+
+        print(f"  [{done+1}/{total}] {run_dir.parent.name}/{run_dir.name} — coding ...", flush=True)
+        try:
+            run = ExperimentRun.model_validate(json.loads(run_json.read_text()))
+            codings = code_bridge_conversations(run, task, topo_k, client)
+            summary = bridge_coding_summary(codings)
+            out_path.write_text(json.dumps({
+                "summary": summary,
+                "codings": [c.to_dict() for c in codings],
+            }, indent=2))
+            done += 1
+            actual_done += 1
+            elapsed = time.time() - t_start
+            eta = (elapsed / actual_done * (total - done)) if actual_done > 0 else 0
+            modes = summary.get("mode_counts", {})
+            print(
+                f"  [{done}/{total}] done  "
+                f"relay={modes.get('relay',0)} filter={modes.get('filter',0)} translate={modes.get('translate',0)}  "
+                f"| elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"  FAILED {run_dir}: {e}", flush=True)
+
+    print(f"Done. {done}/{total} coded → bridge_coding.json per run")
+
+
+def cmd_classify_facts(args: argparse.Namespace) -> None:
+    from gshp.fact_classifier import classify_run
+    from gshp.task.hiring import InformationCondition, build_default_hiring_task
+
+    task = build_default_hiring_task()
+    topo_k = 3
+
+    client_raw = make_llm_client(args.model, temperature=0.0, max_tokens=512)
+
+    # collect run dirs
+    batch_dir = Path(args.batch_dir)
+    run_dirs = sorted(p for p in batch_dir.rglob("run.json") if p.parent.is_dir())
+    if not run_dirs:
+        print(f"No run.json found under {batch_dir}")
+        return
+
+    import time
+    total = len(run_dirs)
+    print(f"Classifying {total} runs with {args.model} ...", flush=True)
+    done = 0
+    skipped = 0
+    t_start = time.time()
+    actual_done = 0  # excludes skipped for ETA calc
+    for run_json in run_dirs:
+        run_dir = run_json.parent
+        if (run_dir / "fact_classification.json").exists() and not args.force:
+            skipped += 1
+            done += 1
+            continue
+        cell = run_dir.parent.name
+        condition = InformationCondition.HIDDEN_PROFILE
+        if "shared_only" in cell:
+            condition = InformationCondition.SHARED_ONLY
+        print(f"  [{done+1}/{total}] {run_dir.parent.name}/{run_dir.name} — classifying ...", flush=True)
+        try:
+            result = classify_run(run_dir, task, topo_k, client_raw, condition, workers=args.workers)
+            done += 1
+            actual_done += 1
+            cl = result.get("cluster", {})
+            br = result.get("bridge", {})
+            elapsed = time.time() - t_start
+            remaining_runs = total - done
+            eta = (elapsed / actual_done * remaining_runs) if actual_done > 0 else 0
+            print(
+                f"  [{done}/{total}] done  "
+                f"cluster: disc={cl.get('disclosed_rate',0):.2f} trans={cl.get('transmitted_rate',0):.2f}  "
+                f"bridge: disc={br.get('disclosed_rate',0):.2f} trans={br.get('transmitted_rate',0):.2f}  "
+                f"| elapsed={elapsed/60:.1f}m  eta={eta/60:.1f}m",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"  FAILED {run_dir}: {e}", flush=True)
+
+    print(f"Done. {done}/{len(run_dirs)} classified → fact_classification.json per run")
+
+
 def cmd_analyze_batch(args: argparse.Namespace) -> None:
     out = write_batch_analysis(
         args.batch_dir,
@@ -443,6 +560,19 @@ def main() -> None:
     pa.add_argument("run_dir", type=str, help="path to results/run_* or batch cell run_001")
     pa.add_argument("--out", type=str, default="", help="write metrics JSON path (default: run_dir/metrics.json)")
     pa.set_defaults(func=cmd_analyze)
+
+    pcb = sub.add_parser("code-bridges", help="DV4: classify bridge turns as relay/filter/translate")
+    pcb.add_argument("batch_dir", type=str, help="batch results folder")
+    pcb.add_argument("--model", type=str, required=True, help="judge model (e.g. vllm:8000/openai/gpt-oss-120b)")
+    pcb.add_argument("--force", action="store_true", help="re-code even if bridge_coding.json exists")
+    pcb.set_defaults(func=cmd_code_bridges)
+
+    pcf = sub.add_parser("classify-facts", help="LLM-based semantic DV2 fact detection on saved transcripts")
+    pcf.add_argument("batch_dir", type=str, help="batch results folder (contains condition=*/run_* subdirs)")
+    pcf.add_argument("--model", type=str, required=True, help="classifier model (e.g. vllm:8000/meta-llama/Llama-3.1-8B-Instruct)")
+    pcf.add_argument("--workers", type=int, default=10, help="parallel classification workers (default 10)")
+    pcf.add_argument("--force", action="store_true", help="re-classify even if fact_classification.json exists")
+    pcf.set_defaults(func=cmd_classify_facts)
 
     pab = sub.add_parser("analyze-batch", help="Aggregate a batch folder into condition-level summaries")
     pab.add_argument("batch_dir", type=str, help="path to batch timestamp folder containing index.csv")
