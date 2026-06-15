@@ -279,10 +279,10 @@ def cmd_code_bridges(args: argparse.Namespace) -> None:
             actual_done += 1
             elapsed = time.time() - t_start
             eta = (elapsed / actual_done * (total - done)) if actual_done > 0 else 0
-            modes = summary.get("mode_counts", {})
             print(
                 f"  [{done}/{total}] done  "
-                f"relay={modes.get('relay',0)} filter={modes.get('filter',0)} translate={modes.get('translate',0)}  "
+                f"relay={summary.get('relay',0)} filter={summary.get('filter',0)} translate={summary.get('translate',0)} "
+                f"rate={summary.get('translate_rate',0):.2f}  "
                 f"| elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m",
                 flush=True,
             )
