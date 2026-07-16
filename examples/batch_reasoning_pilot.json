@@ -1,0 +1,12 @@
+{
+  "model": "vllm:8000/openai/gpt-oss-120b",
+  "grid": {
+    "problem": ["bayes_factory", "conditional_balls", "expected_value_dice"],
+    "schedule": ["within_first", "cross_first"],
+    "deliberation": [true, false]
+  },
+  "runs_per_cell": 25,
+  "concurrent_runs": 4,
+  "dyad_turns": 6,
+  "temperature": 0.0
+}

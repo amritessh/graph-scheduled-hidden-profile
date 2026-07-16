@@ -221,6 +221,79 @@ def cmd_run(args: argparse.Namespace) -> None:
         print(f"group consensus: {run.notes.get('group_consensus')}  accuracy: {run.notes.get('group_accuracy')}")
 
 
+def cmd_run_reasoning(args: argparse.Namespace) -> None:
+    from gshp.experiment_reasoning import run_reasoning_experiment
+    from gshp.task.reasoning import build_default_reasoning_task
+
+    topo = CavemanTopology.build(l=args.l, k=args.k, kind=args.kind)
+    task = build_default_reasoning_task()
+
+    if args.stub:
+        base_client = StubLLM(final_choice="X")
+        model_label = "stub"
+    else:
+        if not args.model:
+            raise SystemExit("Provide --model or --stub")
+        base_client = make_llm_client(args.model, temperature=args.temperature, max_tokens=args.max_tokens)
+        model_label = args.model
+
+    slug = _model_slug(model_label)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    artifact_path = Path(args.artifact_dir) if args.artifact_dir else Path("results") / f"reasoning_{slug}_{ts}"
+
+    client = LoggingLLMClient(base_client, capture_raw_completion=True)
+
+    run = run_reasoning_experiment(
+        topo,
+        args.schedule,
+        task,
+        args.problem,
+        client,
+        dyad_turns=args.dyad_turns,
+        model_label=model_label,
+        seed=args.seed,
+        parallel_dyad_layers=args.parallel_dyads,
+        max_workers=args.workers,
+        group_deliberation=args.group_deliberation,
+        verbose=args.verbose,
+        dyad_context_chars=args.dyad_context_chars,
+        final_memory_chars=args.final_memory_chars,
+    )
+
+    artifact_path.mkdir(parents=True, exist_ok=True)
+    (artifact_path / "run.json").write_text(json.dumps(run.model_dump(mode="json"), indent=2))
+    (artifact_path / "llm_calls.json").write_text(json.dumps(client.calls, indent=2))
+    config = {
+        "task_type": "reasoning",
+        "problem_id": args.problem,
+        "schedule": args.schedule,
+        "model": model_label,
+        "dyad_turns": args.dyad_turns,
+        "group_deliberation": args.group_deliberation,
+        "seed": args.seed,
+    }
+    (artifact_path / "config.json").write_text(json.dumps(config, indent=2))
+    summary = dict(run.notes)
+    summary["model"] = model_label
+    summary["schedule"] = args.schedule
+    (artifact_path / "summary.json").write_text(json.dumps(summary, indent=2))
+
+    print(f"Artifact bundle: {artifact_path}")
+    print("--- summary ---")
+    print(f"problem: {args.problem}")
+    print(f"accuracy (agent-level): {run.notes.get('accuracy_agent_level'):.3f}")
+    print(f"majority: {run.notes.get('majority_vote')} (correct={run.notes.get('majority_correct')})")
+    for d in run.final_decisions:
+        prob = task.get_problem(args.problem)
+        correct_mark = "✓" if task.is_correct(args.problem, d.choice or "") else "✗"
+        print(f"  Agent {d.agent_id}: {d.choice} {correct_mark} — {d.justification[:80]}")
+    if run.deliberation is not None:
+        print("--- group deliberation ---")
+        print(f"group consensus: {run.notes.get('group_consensus')}  "
+              f"correct={run.notes.get('group_consensus_correct')}  "
+              f"group_accuracy={run.notes.get('group_accuracy'):.3f}")
+
+
 def cmd_analyze(args: argparse.Namespace) -> None:
     p = Path(args.run_dir)
     outp = Path(args.out) if args.out else None
@@ -239,7 +312,7 @@ def cmd_code_bridges(args: argparse.Namespace) -> None:
 
     task = build_default_hiring_task()
     topo_k = 3
-    client = make_llm_client(args.model, temperature=0.0, max_tokens=256)
+    client = make_llm_client(args.model, temperature=0.0, max_tokens=args.max_tokens)
 
     batch_dir = Path(args.batch_dir)
     run_jsons = sorted(p for p in batch_dir.rglob("run.json") if p.parent.is_dir())
@@ -269,7 +342,7 @@ def cmd_code_bridges(args: argparse.Namespace) -> None:
         print(f"  [{done+1}/{total}] {run_dir.parent.name}/{run_dir.name} — coding ...", flush=True)
         try:
             run = ExperimentRun.model_validate(json.loads(run_json.read_text()))
-            codings = code_bridge_conversations(run, task, topo_k, client)
+            codings = code_bridge_conversations(run, task, topo_k, client, workers=args.workers)
             summary = bridge_coding_summary(codings)
             out_path.write_text(json.dumps({
                 "summary": summary,
@@ -346,6 +419,19 @@ def cmd_classify_facts(args: argparse.Namespace) -> None:
             print(f"  FAILED {run_dir}: {e}", flush=True)
 
     print(f"Done. {done}/{len(run_dirs)} classified → fact_classification.json per run")
+
+
+def _cmd_batch_reasoning(args: argparse.Namespace) -> None:
+    from gshp.batch_reasoning import run_reasoning_batch
+    overrides = {}
+    if args.model:
+        overrides["model"] = args.model
+    if args.runs is not None:
+        overrides["runs_per_cell"] = args.runs
+    if args.concurrent is not None:
+        overrides["concurrent_runs"] = args.concurrent
+    root = run_reasoning_batch(args.config or None, resume=args.resume, overrides=overrides)
+    print(f"Batch complete: {root}")
 
 
 def cmd_analyze_batch(args: argparse.Namespace) -> None:
@@ -565,6 +651,8 @@ def main() -> None:
     pcb.add_argument("batch_dir", type=str, help="batch results folder")
     pcb.add_argument("--model", type=str, required=True, help="judge model (e.g. vllm:8000/openai/gpt-oss-120b)")
     pcb.add_argument("--force", action="store_true", help="re-code even if bridge_coding.json exists")
+    pcb.add_argument("--workers", type=int, default=8, help="concurrent judge calls per run (default 8)")
+    pcb.add_argument("--max-tokens", type=int, default=1024, help="judge completion token budget (default 1024)")
     pcb.set_defaults(func=cmd_code_bridges)
 
     pcf = sub.add_parser("classify-facts", help="LLM-based semantic DV2 fact detection on saved transcripts")
@@ -573,6 +661,36 @@ def main() -> None:
     pcf.add_argument("--workers", type=int, default=10, help="parallel classification workers (default 10)")
     pcf.add_argument("--force", action="store_true", help="re-classify even if fact_classification.json exists")
     pcf.set_defaults(func=cmd_classify_facts)
+
+    prr = sub.add_parser("run-reasoning", help="Collective reasoning task (no info asymmetry — contrast to hidden profile)")
+    prr.add_argument("--problem", type=str, default="bayes_factory",
+                     help="problem_id from the reasoning task bank (default: bayes_factory)")
+    prr.add_argument("--l", type=int, default=3)
+    prr.add_argument("--k", type=int, default=3)
+    prr.add_argument("--kind", choices=["full_clique_ring", "networkx_caveman", "networkx_connected_caveman"], default="full_clique_ring")
+    prr.add_argument("--schedule", choices=[s.value for s in ScheduleName], default=ScheduleName.WITHIN_FIRST.value)
+    prr.add_argument("--dyad-turns", type=int, default=6)
+    prr.add_argument("--dyad-context-chars", type=int, default=5000)
+    prr.add_argument("--final-memory-chars", type=int, default=6500)
+    prr.add_argument("--stub", action="store_true")
+    prr.add_argument("--model", type=str, default="")
+    prr.add_argument("--temperature", type=float, default=0.0)
+    prr.add_argument("--max-tokens", type=int, default=None)
+    prr.add_argument("--seed", type=int, default=None)
+    prr.add_argument("--parallel-dyads", action="store_true")
+    prr.add_argument("--workers", type=int, default=1)
+    prr.add_argument("--group-deliberation", action="store_true")
+    prr.add_argument("--verbose", action="store_true")
+    prr.add_argument("--artifact-dir", type=str, default="")
+    prr.set_defaults(func=cmd_run_reasoning)
+
+    pbr = sub.add_parser("batch-reasoning", help="Factorial batch for collective reasoning task")
+    pbr.add_argument("--config", type=str, default="", help="path to batch JSON config (optional)")
+    pbr.add_argument("--model", type=str, default="", help="override model")
+    pbr.add_argument("--runs", type=int, default=None, help="override runs_per_cell")
+    pbr.add_argument("--concurrent", type=int, default=None, help="override concurrent_runs")
+    pbr.add_argument("--resume", action="store_true", help="skip completed runs")
+    pbr.set_defaults(func=lambda a: _cmd_batch_reasoning(a))
 
     pab = sub.add_parser("analyze-batch", help="Aggregate a batch folder into condition-level summaries")
     pab.add_argument("batch_dir", type=str, help="path to batch timestamp folder containing index.csv")

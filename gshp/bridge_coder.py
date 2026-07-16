@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -114,8 +115,9 @@ def _judge_user_prompt(
         "recipient's specific knowledge gaps\n"
         '  "translate" — explicitly models the recipient\'s knowledge gaps and frames '
         "the information accordingly\n\n"
-        'Reply with JSON only: {"mode": "relay" or "filter" or "translate", '
-        '"reasoning": "one short sentence"}'
+        "Do not show your reasoning process or use a <think> block. "
+        'Respond with ONLY the JSON object, nothing else: '
+        '{"mode": "relay" or "filter" or "translate", "reasoning": "one short sentence"}'
     )
 
 
@@ -172,6 +174,7 @@ def code_bridge_conversations(
     judge_client: LLMClient,
     *,
     bridge_agent_ids: frozenset[int] | None = None,
+    workers: int = 8,
 ) -> list[BridgeTurnCoding]:
     """
     Classify every bridge-agent turn in every inter-cluster dyad.
@@ -198,14 +201,13 @@ def code_bridge_conversations(
             bridge_agent_ids = frozenset({2, 5, 8})
 
     condition = run.manifest.information_condition
-    codings: list[BridgeTurnCoding] = []
+    jobs: list[dict[str, Any]] = []
 
     for dyad in run.dyads:
         if dyad.round_label != "inter_community":
             continue  # only classify bridge conversations
 
         u, v = dyad.u, dyad.v
-        # Determine which of u, v is the bridge agent (may be both)
         bridges_in_dyad = [a for a in (u, v) if a in bridge_agent_ids]
         if not bridges_in_dyad:
             continue
@@ -213,8 +215,7 @@ def code_bridge_conversations(
         lines: list[str] = []
         for t, msg in enumerate(dyad.messages):
             speaker = int(msg.role.split("_")[-1])
-            line = f"Agent {speaker}: {msg.content}"
-            lines.append(line)
+            lines.append(f"Agent {speaker}: {msg.content}")
 
             if speaker not in bridge_agent_ids:
                 continue  # only classify bridge agent turns
@@ -225,42 +226,59 @@ def code_bridge_conversations(
             unique_facts = _bridge_unique_facts(speaker, task, topo_k, condition)
             so_far = "\n".join(lines[:-1])  # conversation before this turn
 
-            _meta = getattr(judge_client, "set_call_meta", None)
-            if callable(_meta):
-                _meta(kind="bridge_judge", dyad_u=u, dyad_v=v, turn=t, bridge_agent=speaker)
+            jobs.append({
+                "dyad_u": u, "dyad_v": v, "round_label": dyad.round_label,
+                "speaker": speaker, "other": other, "turn": t,
+                "bridge_ci": bridge_ci, "other_ci": other_ci,
+                "unique_facts": unique_facts, "so_far": so_far,
+                "message": msg.content,
+            })
 
-            raw = judge_client.complete(
-                _JUDGE_SYSTEM,
-                [
-                    {
-                        "role": "user",
-                        "content": _judge_user_prompt(
-                            speaker, other,
-                            bridge_ci, other_ci,
-                            unique_facts,
-                            so_far,
-                            msg.content,
-                        ),
-                    }
-                ],
-            )
-            mode, reasoning, parse_ok = _parse_judge_response(raw)
-            codings.append(
-                BridgeTurnCoding(
-                    dyad_u=u,
-                    dyad_v=v,
-                    round_label=dyad.round_label,
-                    bridge_agent=speaker,
-                    other_agent=other,
-                    turn_index=t,
-                    message=msg.content,
-                    mode=mode,
-                    reasoning=reasoning,
-                    parse_ok=parse_ok,
-                )
-            )
+    def _run_job(job: dict[str, Any]) -> BridgeTurnCoding:
+        _meta = getattr(judge_client, "set_call_meta", None)
+        if callable(_meta):
+            _meta(kind="bridge_judge", dyad_u=job["dyad_u"], dyad_v=job["dyad_v"],
+                  turn=job["turn"], bridge_agent=job["speaker"])
+        raw = judge_client.complete(
+            _JUDGE_SYSTEM,
+            [
+                {
+                    "role": "user",
+                    "content": _judge_user_prompt(
+                        job["speaker"], job["other"],
+                        job["bridge_ci"], job["other_ci"],
+                        job["unique_facts"],
+                        job["so_far"],
+                        job["message"],
+                    ),
+                }
+            ],
+        )
+        mode, reasoning, parse_ok = _parse_judge_response(raw)
+        return BridgeTurnCoding(
+            dyad_u=job["dyad_u"],
+            dyad_v=job["dyad_v"],
+            round_label=job["round_label"],
+            bridge_agent=job["speaker"],
+            other_agent=job["other"],
+            turn_index=job["turn"],
+            message=job["message"],
+            mode=mode,
+            reasoning=reasoning,
+            parse_ok=parse_ok,
+        )
 
-    return codings
+    if not jobs:
+        return []
+
+    results: list[BridgeTurnCoding | None] = [None] * len(jobs)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_run_job, job): i for i, job in enumerate(jobs)}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()
+
+    return [c for c in results if c is not None]
 
 
 # ---------------------------------------------------------------------------

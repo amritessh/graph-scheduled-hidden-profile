@@ -125,7 +125,7 @@ total rounds globally.
 
 ---
 
-## Pitch to the professor (one paragraph)
+## One-paragraph summary
 
 > The experiment is an instance of scheduled token spread on a temporal graph — specifically,
 > a ring of cliques under a two-phase edge activation constraint. I want to prove the

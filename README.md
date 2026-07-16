@@ -134,20 +134,43 @@ python -m gshp.cli run \
   --group-deliberation
 ```
 
-**Full 2×2×2 factorial batch (400 runs, 30 concurrent):**
+**Full 2×2×2 factorial batch (400 runs):**
 
 ```bash
-# Dry run first — prints planned grid, writes index.csv, no LLM calls
-python -m gshp.cli batch --config examples/batch_qwen3_full.json --dry-run
+# Simplest — no config file needed, uses built-in defaults
+python -m gshp.cli batch --model vllm:8000/qwen3-30b --runs 50 --concurrent 10
 
-# Real run
-python -m gshp.cli batch --config examples/batch_qwen3_full.json
+# Dry run first
+python -m gshp.cli batch --model vllm:8000/qwen3-30b --dry-run
 
 # Resume after interruption (skips runs that already have summary.json)
-python -m gshp.cli batch --config examples/batch_qwen3_full.json --resume
+python -m gshp.cli batch --model vllm:8000/qwen3-30b --resume
+
+# Or with explicit config file
+python -m gshp.cli batch --config examples/batch_qwen3_full.json
 ```
 
-Results land in `results/qwen3_full_factorial/{YYYYMMDD_HHMMSS}/`.
+Results land in `results/{model_slug}_{YYYYMMDD_HHMMSS}/`.
+
+**Post-experiment analysis (DV2 + DV4):**
+
+```bash
+# DV2: semantic fact detection across saved transcripts (runs on saved results)
+python -m gshp.cli classify-facts results/<batch_dir> \
+  --model vllm:8000/qwen3-30b --workers 10
+
+# DV4: bridge communication quality coding
+python -m gshp.cli code-bridges results/<batch_dir> \
+  --model vllm:8000/qwen3-30b --force --workers 8 --max-tokens 1024
+```
+
+`code-bridges` runs the judge calls concurrently (`--workers`, default 8) and needs
+a generous token budget (`--max-tokens`, default 1024) — a judge capped too low
+will burn its budget on unstructured reasoning and return empty responses instead
+of a classification. Use `--force` to re-code runs that already have `bridge_coding.json`
+(e.g. after fixing the judge prompt or raising the token budget).
+
+Both commands are resumable — skip runs that already have output files.
 
 ---
 
@@ -165,12 +188,26 @@ python -m gshp.cli run            [--stub | --model SPEC]
                                   [--workers N]             # threads per matching layer
                                   [--group-deliberation]    # final group consensus round
                                   [--task-file PATH]        # use a generated task JSON
+                                  [--verbose]               # print each agent turn as it arrives
                                   [--seed N]
                                   [--temperature F]
                                   [--max-tokens N]
                                   [--artifact-dir DIR]
                                   [--out PATH]
-python -m gshp.cli batch          --config PATH.json [--dry-run] [--resume]
+python -m gshp.cli batch          [--config PATH.json]      # optional; uses built-in defaults
+                                  [--model SPEC]            # override model
+                                  [--runs N]                # override runs_per_cell
+                                  [--concurrent N]          # override concurrent_runs
+                                  [--dry-run] [--resume]
+python -m gshp.cli classify-facts BATCH_DIR                 # DV2: LLM semantic fact classifier
+                                  --model SPEC
+                                  [--workers N]
+                                  [--force]
+python -m gshp.cli code-bridges   BATCH_DIR                 # DV4: relay/filter/translate bridge coder
+                                  --model SPEC
+                                  [--force]
+                                  [--workers N]             # concurrent judge calls per run (default 8)
+                                  [--max-tokens N]          # judge completion budget (default 1024)
 python -m gshp.cli generate-task  --domain "medical diagnosis"
                                   [--model SPEC | --stub]
                                   [--temperature F]
@@ -182,6 +219,10 @@ python -m gshp.cli analyze-batch  BATCH_DIR
                                   [--out-json PATH]
                                   [--out-csv PATH]
                                   [--out-report PATH]
+python -m gshp.cli run-reasoning  [--stub | --model SPEC]  # single reasoning-task run
+                                  [--problem ID] [--schedule S] [--deliberation]
+python -m gshp.cli batch-reasoning [--config PATH.json]    # reasoning-task factorial batch
+                                  [--model SPEC] [--runs N] [--concurrent N] [--resume]
 ```
 
 **`--model` string format:**
@@ -264,15 +305,23 @@ Every run (single or batch) writes the same full bundle — no lightweight mode.
 | `task.json` | Full task spec (all fact texts and assignments) for reproducibility |
 | `summary.json` | Votes, accuracy, majority, unanimous_correct, deliberation outcome |
 | `metrics.json` | LLM aggregate stats, fact mention rates, notes |
-| `dv3.json` | Convergence/alignment dissociation metrics (overall + by cluster) |
-| `info_gain.json` | Entropy trajectory, per-message ΔH, waste, agent/category bits, Shapley interaction decomposition |
-| `llm_calls.json` | Every LLM call: prompt, response, latency, usage, raw OpenAI completion |
+| `llm_calls.json` | Every LLM call: prompt, response, raw_response (pre-stripping), latency, usage |
 | `run.json` | Full serialized `ExperimentRun` (all dyads + decisions) |
 | `dyad_NNN_label.json` | One transcript per dyadic conversation |
-| `fact_transmission.json` | DV2: disclosure / transmission / integration rates by fact category |
+| `fact_transmission.json` | DV2 (keyword): disclosure / transmission / integration rates by fact category |
+| `fact_classification.json` | DV2 (semantic): LLM-classified disclosure / transmission / integration (written by `classify-facts`) |
+| `bridge_coding.json` | DV4: relay/filter/translate counts + translate_rate per bridge agent (written by `code-bridges`) |
 | `deliberation.json` | Group deliberation round (if `--group-deliberation`) |
 | `game_log.txt` | Human-readable trace: dyad index, agents, round, final decisions |
 | `error.txt` | Stack trace (failed runs only) |
+
+**Batch-level files** (in the timestamped batch folder):
+
+| File | Contents |
+|------|----------|
+| `index.csv` | One row per run: grid columns, accuracy, majority vote, group_accuracy, seed, status |
+| `progress.json` | Live progress: completed / failed / skipped counts |
+| `batch_config.json` | Resolved config used for this batch |
 
 **Re-analyze a folder** (e.g. after changing heuristics):
 
@@ -306,10 +355,31 @@ bash scripts/post_run_analysis.sh results/qwen3_full_factorial/<batch_folder>
 ## Local LLM (vLLM)
 
 ```bash
+# Basic
 vllm serve Qwen/Qwen3-8B --port 8000 --api-key dummy
+
+# With custom served name (use this name in --model)
+docker run -d --gpus '"device=0"' --name vllm-qwen3 -p 8000:8000 \
+  vllm/vllm-openai:latest Qwen/Qwen3-30B \
+  --served-model-name qwen3-30b \
+  --tensor-parallel-size 1
+
+# Check what model id is being served
+curl http://localhost:8000/v1/models | python3 -m json.tool
 ```
 
-Then use `--model vllm:8000/Qwen/Qwen3-8B` in any CLI command or set `"model"` in the batch config.
+Then use `--model vllm:8000/<id>` where `<id>` matches the `id` field from the models endpoint.
+
+**SSH tunnel for remote vLLM:**
+
+```bash
+ssh -L 8000:localhost:8000 user@remote-server
+# then use --model vllm:8000/<id> locally
+```
+
+**Qwen3 note:** Qwen3 emits `<think>...</think>` reasoning blocks before responses.
+The `LoggingLLMClient` automatically strips these before downstream processing
+and preserves the raw output in `raw_response` for artifact analysis.
 
 ---
 
@@ -330,12 +400,16 @@ gshp/
   session.py            # run_dyad_llm: alternating-speaker dyad execution
   prompts.py            # Per-agent system prompts + ToM block for bridge nodes
   deliberation.py       # Group deliberation round after individual decisions
-  fact_tracker.py       # DV2: disclosure / transmission / integration analysis
-  bridge_coder.py       # DV4: relay/filter/translate LLM judge
+  fact_tracker.py       # DV2 keyword: disclosure / transmission / integration analysis
+  fact_classifier.py    # DV2 semantic: LLM-based fact detection (liberal matching)
+  bridge_coder.py       # DV4: relay/filter/translate LLM judge per bridge turn
+  dv3.py                # DV3: convergence/alignment dissociation metrics (simple proxy)
+  info_gain.py          # DV3: entropy-reduction + Shapley synergy over ground-truth
+                        #   fact eliminations (keyword-detected, no LLM calls)
   types.py              # Pydantic models: ExperimentRun, DyadTranscript, AgentDecision, …
   llm/
     openai_local.py     # vLLM / OpenAI-compatible sync client + clone()
-    logging_client.py   # Wraps any client, records every call for llm_calls.json
+    logging_client.py   # Wraps any client; strips <think> blocks; records raw_response
     stub_client.py      # StubLLM for tests / dry runs
   artifacts.py          # Write full artifact bundle
   batch.py              # Factorial batch runner (concurrent_runs, progress.json, index.csv)
@@ -344,13 +418,21 @@ gshp/
   audit.py              # Git head, package versions, prompt_template_id
   metrics.py            # LLM call stats, fact mention heuristic
   analyze_run.py        # Offline metrics recomputation from artifact folder
-  cli.py                # inspect, dry-run, run, batch, generate-task, analyze
+  batch_reasoning.py    # Factorial batch runner for the reasoning contrast task
+  experiment_reasoning.py  # run_reasoning_experiment(): pipeline for the reasoning task
+  prompts_reasoning.py  # Per-agent prompts for the reasoning task (no info asymmetry)
+  task/
+    reasoning.py         # ReasoningTaskSpec: 10 math/probability problems + answer checking
+  cli.py                # All subcommands: inspect, dry-run, run, batch, classify-facts,
+                        #   code-bridges, generate-task, analyze, analyze-batch,
+                        #   run-reasoning, batch-reasoning
 docs/
   experiment_overview.md    # Plain-language experiment explanation
   algorithms.md             # Matching layers + parallel dyad algorithm
   theory_token_spread.md    # Graph-theory layer: scheduled token spread on ring-of-cliques
 examples/
-  batch_qwen3_full.json     # 2×2×2 factorial, 50 runs/cell, Qwen3-8B, 30 concurrent
+  batch_qwen3_full.json     # 2×2×2 factorial, 50 runs/cell, 30 concurrent
+  batch_reasoning_pilot.json  # Reasoning-task contrast batch config
   batch_stub.json           # Same grid with stub LLM (testing)
   batch_stub_tiny.json      # Single cell, 2 runs (CI / quick check)
 tests/
@@ -377,11 +459,10 @@ should track the theoretical round-complexity gap. See [docs/theory_token_spread
 
 - Momennejad *et al.* Collective memory and social tie structure in networked communication. *Nat. Commun.* 2019. [DOI 10.1038/s41467-019-09452-y](https://doi.org/10.1038/s41467-019-09452-y)
 - Stasser & Titus. Pooling of unshared information in group decision making. *JPSP* 1985.
-- Riedl *et al.* Partial information decomposition for collective intelligence. *(see PI's Google Scholar)*
+- Partial information decomposition for collective intelligence *(see references for the specific method)*
 
 ---
 
 ## License / collaboration
 
-Experiment design by Prof. Christoph Riedl. Engineering by Amritesh Anand.
 Add a `LICENSE` and citation when publishing code or paper.

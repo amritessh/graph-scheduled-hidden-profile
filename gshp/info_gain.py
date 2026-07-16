@@ -197,6 +197,51 @@ def _fact_categories(task: Any) -> dict[str, str]:
     return out
 
 
+# Curated phrase patterns per fact, grounded in real transcript paraphrases (no LLM
+# calls — this is a deterministic keyword layer added on top of literal fact-text /
+# fact-id matching, to catch paraphrases the literal matcher misses). Each fact maps
+# to a list of "pattern groups"; a group is itself a list of substrings that must
+# ALL appear (AND) for that group to count as a hit, and any group hitting is enough (OR).
+_KEYWORD_PATTERNS: dict[str, list[list[str]]] = {
+    "s_x1": [["gpa"], ["honors"]],
+    "s_x2": [["strong reference"]],
+    "s_x3": [["interview"]],
+    "s_x4": [["on paper"], ["years of relevant experience"], ["years of experience"]],
+    "s_y1": [["adequate experience"], ["adequate"]],
+    "s_z1": [["certification"]],
+    "c0_y1": [["exact challenge"], ["exact problem"], ["precise challenge"], ["type of challenge"], ["solved the exact"]],
+    "c0_y2": [["hardest part"], ["toughest part"], ["toughest aspect"], ["hardest aspect"],
+              ["hardest requirement"], ["toughest requirement"], ["toughest need"], ["hardest need"]],
+    "c1_y1": [["technical scores"], ["domain scores"], ["domain-specific scores"], ["domain that matters"]],
+    "c1_y2": [["under-represent"], ["under represent"], ["under-report"], ["under report"],
+              ["strongest projects"], ["biggest projects"]],
+    "c2_y1": [["conflict of interest"], ["undisclosed conflict"], ["potential conflict"]],
+    "c2_y2": [["values align"], ["values line up"], ["mission fit"], ["mission alignment"],
+              ["values", "mission"]],
+    # bare "bridge" was too promiscuous (agents say "bridge to Cluster B" loosely even
+    # without conveying the linking fact's actual content) — require content-specific
+    # co-occurrence instead. Speaker-identity gating (see below) still disambiguates
+    # which of the 3 bridge facts a hit refers to.
+    "b2_link": [["critical technical"], ["technical area"], ["problem", "cluster b"], ["solved", "cluster b"]],
+    "b5_link": [["mission-fit"], ["mission fit"], ["under-report", "mission"], ["under report", "mission"],
+                ["cluster c"]],
+    "b8_link": [["reference depth"], ["conflict", "unrelated"], ["conflict", "reference"]],
+}
+
+
+def _normalize_dashes(text: str) -> str:
+    for ch in ("‐", "‑", "‒", "–", "—", "−"):
+        text = text.replace(ch, "-")
+    return text
+
+
+def _keyword_hit(fid: str, low_text: str) -> bool:
+    groups = _KEYWORD_PATTERNS.get(fid)
+    if not groups:
+        return False
+    return any(all(term in low_text for term in group) for group in groups)
+
+
 def _extract_facts_by_message(
     run: ExperimentRun,
     fact_text: dict[str, str],
@@ -204,6 +249,17 @@ def _extract_facts_by_message(
     fids = sorted(fact_text.keys())
     patterns = [fact_text[fid].strip().lower() for fid in fids if (fact_text[fid] or "").strip()]
     ac = AhoCorasickAutomaton(patterns) if patterns else None
+
+    # map agent -> the single bridge fact id they can speak (bridge facts are only ever
+    # known by their designated bridge agent, so speaker identity disambiguates which
+    # bridge fact a bare "bridge" mention refers to)
+    bridge_fid_by_agent: dict[int, str] = {}
+    for fid in fids:
+        if fid.startswith("b") and fid.endswith("_link"):
+            # bridge fact ids look like b2_link / b5_link / b8_link -> agent id is the digits
+            digits = "".join(ch for ch in fid if ch.isdigit())
+            if digits:
+                bridge_fid_by_agent[int(digits)] = fid
 
     out: dict[tuple[int, int], list[str]] = {}
     for dyad_i, dyad in enumerate(run.dyads):
@@ -230,6 +286,23 @@ def _extract_facts_by_message(
                 needle = (fact_text.get(fid) or "").strip().lower()
                 if needle and needle in low:
                     found.add(fid)
+
+            # Keyword/phrase layer (paraphrase-aware, no LLM calls): curated patterns
+            # per fact, plus speaker-identity disambiguation for bare "bridge" mentions.
+            low_norm = _normalize_dashes(low)
+            try:
+                speaker = int(str(msg.role).split("_")[-1])
+            except (ValueError, AttributeError):
+                speaker = None
+            for fid in fids:
+                if fid in bridge_fid_by_agent.values():
+                    continue  # handled via speaker identity below
+                if _keyword_hit(fid, low_norm):
+                    found.add(fid)
+            if speaker is not None and speaker in bridge_fid_by_agent:
+                bfid = bridge_fid_by_agent[speaker]
+                if _keyword_hit(bfid, low_norm):
+                    found.add(bfid)
 
             if not found:
                 continue

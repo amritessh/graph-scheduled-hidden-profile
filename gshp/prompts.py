@@ -44,7 +44,7 @@ def agent_system_prompt(
 
     tom_block = ""
     if use_tom:
-        # Exact wording from study design spec (Riedl 2024)
+        # Exact wording from the study design spec
         tom_block = (
             "\n\nYou connect two different groups of colleagues. Before each conversation, "
             "consider: *What does this person likely know about the candidates? "
